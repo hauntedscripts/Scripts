@@ -8,95 +8,6 @@ if not LocalPlayer then
     repeat wait(0.1); LocalPlayer = Players.LocalPlayer until LocalPlayer
 end
 
-local PROMO_DISCORD_LINK="https://discord.gg/nEVuMCZmqR"
-
-task.spawn(function()
-    local viewportX=1280
-    pcall(function()
-        local viewport=game.Workspace.CurrentCamera.ViewportSize
-        if viewport and viewport.X then viewportX=viewport.X end
-    end)
-
-    local boxWidth,boxHeight=570,92
-    local boxX,boxY=math.floor((viewportX-boxWidth)/2),22
-    local buttonWidth,buttonHeight=160,36
-    local buttonX=boxX+boxWidth-buttonWidth-18
-    local buttonY=boxY+44
-    local promoObjects={}
-
-    local function keep(object)
-        table.insert(promoObjects,object)
-        return object
-    end
-
-    local function square(x,y,w,h,color,z)
-        local object=keep(Drawing.new("Square"))
-        object.Position=Vector2.new(x,y)
-        object.Size=Vector2.new(w,h)
-        object.Color=color
-        object.Transparency=1
-        object.Filled=true
-        object.ZIndex=z
-        object.Visible=true
-        return object
-    end
-
-    local function textLabel(text,x,y,size,centered,color,z)
-        local object=keep(Drawing.new("Text"))
-        object.Text=text
-        object.Position=Vector2.new(x,y)
-        object.Size=size
-        object.Color=color
-        object.Transparency=1
-        object.Center=centered
-        object.Outline=true
-        object.Font=Drawing.Fonts.SystemBold
-        object.ZIndex=z
-        object.Visible=true
-        return object
-    end
-
-    square(boxX,boxY,boxWidth,boxHeight,Color3.fromRGB(18,20,27),900)
-    square(boxX,boxY,boxWidth,4,Color3.fromRGB(0,200,105),901)
-    textLabel("laced.lol",boxX+18,boxY+15,18,false,Color3.fromRGB(255,255,255),903)
-    textLabel("bud, join the discord server for the script",boxX+18,boxY+45,15,false,Color3.fromRGB(205,210,220),903)
-    local copyButton=square(buttonX,buttonY,buttonWidth,buttonHeight,Color3.fromRGB(0,180,95),902)
-    textLabel("Copy Discord Link",buttonX+buttonWidth/2,buttonY+9,16,true,Color3.fromRGB(255,255,255),903)
-
-    local mouse=nil
-    pcall(function() mouse=LocalPlayer:GetMouse() end)
-    local startedAt=os.clock()
-    local wasPressed=false
-
-    while os.clock()-startedAt<3 do
-        local mouseX,mouseY=-1,-1
-        if mouse then
-            local okMouse,x,y=pcall(function() return mouse.X,mouse.Y end)
-            if okMouse and type(x)=="number" and type(y)=="number" then
-                mouseX,mouseY=x,y
-            end
-        end
-
-        local hovering=mouseX>=buttonX and mouseX<=buttonX+buttonWidth
-            and mouseY>=buttonY and mouseY<=buttonY+buttonHeight
-        copyButton.Color=hovering and Color3.fromRGB(0,215,115) or Color3.fromRGB(0,180,95)
-
-        local pressed=false
-        local okPressed,pressedValue=pcall(function() return ismouse1pressed() end)
-        if okPressed and pressedValue==true then pressed=true end
-        if hovering and pressed and not wasPressed then
-            local copied=pcall(function() setclipboard(PROMO_DISCORD_LINK) end)
-            notify(copied and "Discord link copied!" or PROMO_DISCORD_LINK,"laced.lol",3)
-        end
-        wasPressed=pressed
-        task.wait()
-    end
-
-    for _,object in ipairs(promoObjects) do
-        pcall(function() object:Remove() end)
-    end
-end)
-
 S = {
 
     autoFarming     = false,
@@ -114,6 +25,12 @@ S = {
     autoNpcFarm     = false,
     autoFarmLevel   = false,
     autoFish        = false,
+    autoRepair      = false,
+    dungeonEnabled  = false,
+    dungeonAutoDoor = true,
+    dungeonDestroyObj = true,
+    dungeonUseMoves = true,
+    dungeonLocalRadius = 1000,
     sanguineZBoost  = false,
     dragonTalonZBoost = false,
     yamaZBoost      = false,
@@ -224,6 +141,7 @@ S = {
 function farmPriorityBlocked()
     return S.fruitPriorityActive == true or S.autoDinoBone == true or S.autoBossFarm == true or S.autoMaterialFarm == true
         or S.autoSeaEvent == true
+        or S.dungeonEnabled == true
         or S.autoMirageTween == true or S.autoMirageGear == true
 end
 
@@ -533,11 +451,296 @@ islandList = {
 
 do
     local ok, err = pcall(function()
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/myth4c/Scripts2/refs/heads/main/wabisabi%20lib"))()
-        Library = WabiSabiUILibrary
+        -- Load the pinned UE version requested by the script owner.
+        local ueSource = game:HttpGet("https://raw.githubusercontent.com/hauntedscripts/Scripts2/refs/heads/main/matcha%20ue")
+        local ueChunk, ueError = loadstring(ueSource, "laced.club UE")
+        if not ueChunk then error(ueError or "UE compile failed") end
+        ueChunk()
+
+        local UE = (_G and (_G.UELibrary or _G.Library)) or UELibrary
+        if type(UE) ~= "table" then error("UE did not expose UELibrary") end
+
+        local controls = {}
+
+        local function roundingFor(step, explicit)
+            if tonumber(explicit) then return math.max(0, math.floor(tonumber(explicit))) end
+            step = tonumber(step) or 1
+            if step >= 1 then return 0 end
+            local decimals = tostring(step):match("%.(%d+)")
+            return decimals and #decimals or 0
+        end
+
+        local function enhanceControl(id, control)
+            if not control then return control end
+            controls[id] = control
+            control.Set = control.SetValue
+            control.SetOptions = control.SetValues
+            return control
+        end
+
+        local function makeTab(rawTab)
+            local tab = { Raw = rawTab, Groups = {} }
+
+            local function columnOf(info)
+                local column = tonumber(info and info.Column) or 1
+                return column == 2 and 2 or 1
+            end
+
+            local function groupFor(self, info)
+                local column = columnOf(info)
+                local group = self.Groups[column]
+                if not group then
+                    if column == 2 then group = self.Raw:AddRightGroupbox("General")
+                    else group = self.Raw:AddLeftGroupbox("General") end
+                    self.Groups[column] = group
+                end
+                return group
+            end
+
+            function tab:AddSection(name, info)
+                local column = columnOf(info)
+                local group
+                if column == 2 then group = self.Raw:AddRightGroupbox(name)
+                else group = self.Raw:AddLeftGroupbox(name) end
+                self.Groups[column] = group
+                return group
+            end
+
+            function tab:AddToggle(id, info)
+                info = info or {}
+                local group = groupFor(self, info)
+                local toggle = group:AddToggle(id, {
+                    Text = info.Text or id,
+                    Default = info.Default == true,
+                    Callback = info.Callback,
+                    Tooltip = info.Description,
+                    Risky = info.Risky == true,
+                })
+                enhanceControl(id, toggle)
+                if info.Keybind == true then
+                    local picker = toggle:AddKeyPicker(id .. "_keybind", {
+                        Text = (info.Text or id) .. " key",
+                        Default = "None",
+                        Mode = "Toggle",
+                        SyncToggleState = true,
+                    })
+                    enhanceControl(id .. "_keybind", picker)
+                end
+                return toggle
+            end
+
+            function tab:AddSlider(id, info)
+                info = info or {}
+                local step = tonumber(info.Step) or 1
+                local minimum = tonumber(info.Min) or 0
+                local maximum = tonumber(info.Max) or 100
+                local callback = info.Callback
+                local slider
+                local function changed(value)
+                    local snapped = minimum + math.floor(((value - minimum) / step) + 0.5) * step
+                    if snapped < minimum then snapped = minimum end
+                    if snapped > maximum then snapped = maximum end
+                    if slider then slider.Value = snapped end
+                    if callback then callback(snapped) end
+                end
+                slider = groupFor(self, info):AddSlider(id, {
+                    Text = info.Text or id,
+                    Default = info.Default,
+                    Min = minimum,
+                    Max = maximum,
+                    Rounding = roundingFor(step, info.Decimals),
+                    Suffix = info.Suffix or "",
+                    Callback = changed,
+                    Tooltip = info.Description,
+                })
+                return enhanceControl(id, slider)
+            end
+
+            function tab:AddDropdown(id, info)
+                info = info or {}
+                local dropdown = groupFor(self, info):AddDropdown(id, {
+                    Text = info.Text or id,
+                    Default = info.Default,
+                    Values = info.Options or info.Values or {},
+                    Multi = info.Multi == true,
+                    AllowNull = info.AllowNull == true,
+                    Callback = info.Callback,
+                    Tooltip = info.Description,
+                })
+                return enhanceControl(id, dropdown)
+            end
+
+            function tab:AddButton(id, info)
+                info = info or {}
+                local button = groupFor(self, info):AddButton({
+                    Text = info.Text or id,
+                    Func = info.Callback,
+                    Tooltip = info.Description,
+                    DoubleClick = info.DoubleClick == true,
+                })
+                return enhanceControl(id, button)
+            end
+
+            function tab:AddPriorityList(id, info)
+                info = info or {}
+                local group = groupFor(self, info)
+                local options = info.Options or {}
+                local selected = {}
+                for index, value in ipairs(info.Default or options) do selected[index] = value end
+                local pickers = {}
+                local changing = false
+
+                local function emit()
+                    if info.Callback then
+                        local order = {}
+                        for index = 1, #options do order[index] = selected[index] end
+                        info.Callback(order)
+                    end
+                end
+
+                for index = 1, #options do
+                    local slot = index
+                    local oldValue = selected[slot]
+                    local picker
+                    picker = group:AddDropdown(id .. "_" .. tostring(slot), {
+                        Text = (info.Text or id) .. " " .. tostring(slot),
+                        Default = selected[slot],
+                        Values = options,
+                        Callback = function(value)
+                            if changing then return end
+                            local previous = selected[slot]
+                            local duplicate = nil
+                            for other = 1, #selected do
+                                if other ~= slot and selected[other] == value then duplicate = other break end
+                            end
+                            selected[slot] = value
+                            if duplicate then
+                                selected[duplicate] = previous
+                                if pickers[duplicate] then pickers[duplicate].Value = previous end
+                            end
+                            oldValue = value
+                            emit()
+                        end,
+                        Tooltip = info.Description,
+                    })
+                    pickers[slot] = picker
+                    enhanceControl(id .. "_" .. tostring(slot), picker)
+                end
+
+                local list = { Pickers = pickers, Value = selected }
+                function list:SetValue(order)
+                    if type(order) ~= "table" then return self end
+                    changing = true
+                    for index = 1, math.min(#order, #pickers) do
+                        selected[index] = order[index]
+                        pickers[index].Value = order[index]
+                    end
+                    changing = false
+                    emit()
+                    return self
+                end
+                function list:SetValues(values)
+                    for _, picker in ipairs(pickers) do picker:SetValues(values or {}) end
+                    return self
+                end
+                list.SetOptions = list.SetValues
+                controls[id] = list
+                return list
+            end
+
+            return tab
+        end
+
+        local Adapter = { Raw = UE, Controls = controls, Windows = {} }
+
+        local function makePopup(adapter, info)
+            info = info or {}
+            local raw = adapter.Raw:CreateWindow({
+                Title = info.Title or "Settings",
+                Width = info.Width or 520,
+                Height = info.Height or 500,
+                AutoShow = false,
+                Center = true,
+            })
+            -- UE stores a library-wide visibility flag whenever any window is
+            -- created. A hidden popup must not hide the already-visible hub.
+            adapter.Raw.Toggled = true
+            local page = makeTab(raw:AddTab(info.Title or "Settings"))
+            local popup = { Raw = raw }
+            function popup:AddSection(...) return page:AddSection(...) end
+            function popup:AddToggle(...) return page:AddToggle(...) end
+            function popup:AddSlider(...) return page:AddSlider(...) end
+            function popup:AddDropdown(...) return page:AddDropdown(...) end
+            function popup:AddButton(...) return page:AddButton(...) end
+            function popup:AddPriorityList(...) return page:AddPriorityList(...) end
+            function popup:Show() raw:Show() return self end
+            function popup:Hide() raw:Hide() return self end
+            function popup:Set(id, value)
+                local control = controls[id]
+                if control and control.SetValue then control:SetValue(value)
+                elseif control and control.Set then control:Set(value) end
+                return self
+            end
+            return popup
+        end
+
+        function Adapter:CreateWindow(info)
+            info = info or {}
+            local accent = info.Theme and info.Theme.Colors and info.Theme.Colors.Accent
+            if accent then self.Raw.AccentColor = accent end
+            local raw = self.Raw:CreateWindow({
+                Title = info.Title or "laced.club",
+                Width = info.Width or 540,
+                Height = info.Height or 430,
+                AutoShow = true,
+                Center = true,
+            })
+            local window = {
+                Raw = raw,
+                Tabs = {},
+                Indicator = { SetVisible = function() end },
+                Config = { IndicatorEnabled = false },
+                _lastMenuDown = false,
+            }
+
+            function window:AddTab(name)
+                local tab = makeTab(raw:AddTab(name))
+                self.Tabs[name] = tab
+                return tab
+            end
+
+            function window:Set(id, value)
+                local control = controls[id]
+                if control and control.SetValue then control:SetValue(value)
+                elseif control and control.Set then control:Set(value) end
+                return self
+            end
+
+            function window:CreatePopup(popupInfo)
+                return makePopup(Adapter, popupInfo)
+            end
+
+            function window:Show() raw:Show() return self end
+            function window:Hide() raw:Hide() return self end
+            function window:SetVisible(value) if value then raw:Show() else raw:Hide() end return self end
+
+            -- The source calls Step every frame. UE already renders in its own
+            -- loop, so this only owns the F1 edge used to show/hide the menu.
+            function window:Step()
+                local down = false
+                pcall(function() down = iskeypressed(0x23) end)
+                if down and not self._lastMenuDown then raw:Toggle() end
+                self._lastMenuDown = down
+            end
+
+            table.insert(Adapter.Windows, window)
+            return window
+        end
+
+        Library = Adapter
     end)
     if not ok or not Library then
-        warn("Failed to load WabiSabi UI: " .. tostring(err))
+        warn("Failed to load UE UI: " .. tostring(err))
         return
     end
 end
@@ -556,7 +759,7 @@ Window = Library:CreateWindow({
     ConfigFile = "myth4c_bloxfruits.json",
     BuiltInIndicatorToggle = false,
     Width = 540,
-    Height = 430,
+    Height = 570,
     Theme = { Colors = { Accent = Color3.fromRGB(0,170,80) } }
 })
 
@@ -689,7 +892,7 @@ do
     misc2Tab:AddToggle("magnet_auto_farm_nearest",{
         Text="Auto Farm Nearest Enemy",
         Description="Tweens to each nearest enemy, holds still for 1 second, then switches",
-        Default=false,Keybind=true,Column=2,
+        Default=false,Column=2,
         Callback=function(value)
             MagnetSettings.autoFarmNearest=value
             magnetResetNearestFarm()
@@ -989,6 +1192,50 @@ do
     end)
 end
 
+misc2Tab:AddSection("Ship Repair",{Column=1})
+misc2Tab:AddToggle("auto_ship_repair",{
+    Text="Auto Repair",
+    Description="Automatically holds and releases the ship repair mini-game in its green zone",
+    Default=false,
+    Keybind=true,
+    Column=1,
+    Callback=function(value)
+        S.autoRepair=value
+        if value then pcall(function() Window:Set("auto_fish",false) end) end
+        if not value then pcall(mouse1release) end
+        notify(value and "Auto Repair ON!" or "Auto Repair OFF!","laced.club",2)
+    end
+})
+
+mainTab:AddSection("Dungeon",{Column=2})
+mainTab:AddToggle("dungeon_enabled",{
+    Text="Enable Dungeon",
+    Description="Master switch for the Second Sea dungeon automation",
+    Default=false,Keybind=true,Column=2,
+    Callback=function(value)
+        S.dungeonEnabled=value
+        notify(value and "Dungeon Farm ON!" or "Dungeon Farm OFF!","laced.club",2)
+    end
+})
+mainTab:AddToggle("dungeon_auto_door",{
+    Text="Smart Door Path",
+    Description="Moves to the exit teleporter when the current island is clear",
+    Default=true,Column=2,
+    Callback=function(value) S.dungeonAutoDoor=value end
+})
+mainTab:AddToggle("dungeon_destroy_vents",{
+    Text="Destroy Vents First",
+    Description="Prioritizes vents, shrines, rocks, and dungeon props",
+    Default=true,Column=2,
+    Callback=function(value) S.dungeonDestroyObj=value end
+})
+mainTab:AddToggle("dungeon_vent_skills",{
+    Text="Skills on Vents Z/X/C/V",
+    Description="Uses equipped-tool skills against dungeon objectives",
+    Default=true,Column=2,
+    Callback=function(value) S.dungeonUseMoves=value end
+})
+
 local BOSS_OPTIONS={"The Gorilla King","Bobby","The Saw","Yeti","Mob Leader","Vice Admiral","Saber Expert","Warden","Chief Warden","Swan","Magma Admiral","Fishman Lord","Wysper","Thunder God","Cyborg","Ice Admiral","Greybeard","Diamond","Jeremy","Orbitus","Don Swan","Smoke Admiral","Awakened Ice Admiral","Tide Keeper","Darkbeard","Cursed Captain","Order","Stone","Hydra Leader","Kilo Admiral","Captain Elephant","Beautiful Pirate","Cake Queen","Dough King","Longma","Soul Reaper","rip_indra True Form","Tyrant of the Skies"}
 local MATERIAL_OPTIONS={"Leather + Scrap Metal","Angel Wings","Magma Ore","Fish Tail","Radioactive Material","Ectoplasm","Mystic Droplet","Vampire Fang","Demonic Wisp","Conjured Cocoa","Dragon Scale","Gunpowder","Mini Tusk"}
 local SEA_EVENT_OPTIONS={"Shark","Terrorshark","Piranha","Fish Crew Member","Haunted Crew Member"}
@@ -1077,7 +1324,7 @@ mainTab:AddToggle("auto_farm_nearest", {
 
 mainTab:AddToggle("remote_mode", {
     Text="remotemode(crashable)", Description="Instead of teleporting and clicking, fires RegisterAttack + RegisterHit on all enemies within 60 studs. ONLY WORKS ON MATCHA PRO.",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.remoteMode=v
         notify(v and "Remote Mode ON! (RegisterHit aura)" or "Remote Mode OFF! (back to click farm)","laced.club",2)
@@ -1086,7 +1333,7 @@ mainTab:AddToggle("remote_mode", {
 
 mainTab:AddToggle("auto_farm_chest", {
     Text="Auto Farm Chest", Description="Automatically farms chests (load them in first!)",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.autoFarming=v; S.handledChests={}; if v then S.chestIndex=1 end; notify(v and "Auto Farm Chest ON!" or "Auto Farm Chest OFF!","laced.club",2) end
 })
 
@@ -1111,7 +1358,7 @@ otherTab:AddPriorityList("chest_priority", {
 
 mainTab:AddToggle("auto_farm_fruits", {
     Text="Auto Farm Fruits", Description="Tweens to the nearest fruit and farms it",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.autoFruits=v
         if not v then S.fruitPriorityActive=false end
@@ -1121,7 +1368,7 @@ mainTab:AddToggle("auto_farm_fruits", {
 
 mainTab:AddToggle("auto_dino_bone", {
     Text="Auto DinoBone", Description="Teleports to every Workspace.DinoBone until it disappears",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.autoDinoBone=v
         notify(v and "Auto DinoBone ON!" or "Auto DinoBone OFF!","laced.club",2)
@@ -1137,7 +1384,7 @@ mainTab:AddSection("NPC Farm", { Column = 1 })
 
 mainTab:AddToggle("auto_npc_farm", {
     Text="Auto NPC Farm", Description="Farms NPCs on the selected island",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.autoNpcFarm=v; notify(v and "Auto NPC Farm ON!" or "Auto NPC Farm OFF!","laced.club",2) end
 })
 
@@ -1154,7 +1401,7 @@ mainTab:AddDropdown("npc_island", {
 
 mainTab:AddToggle("auto_farm_level", {
     Text="Auto Farm Level", Description="Farms mobs based on your current level (quest giver must be loaded!)",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.autoFarmLevel=v
         if v then pcall(function() AFL.lastLevel=afl_readLevel() or 0 end) end
@@ -1197,7 +1444,7 @@ local meleeWeaponToggle=nil
 local swordWeaponToggle=nil
 
 meleeWeaponToggle=mainTab:AddToggle("weapon_melee", {
-    Text="Melee", Description="Use inventory slot 1 after collecting a fruit",
+    Text="Melee", Description="Use inventory slot 1 for farming",
     Default=true, Column=2,
     Callback=function(v)
         if v then
@@ -1210,7 +1457,7 @@ meleeWeaponToggle=mainTab:AddToggle("weapon_melee", {
 })
 
 swordWeaponToggle=mainTab:AddToggle("weapon_sword", {
-    Text="Sword", Description="Use inventory slot 3 after collecting a fruit",
+    Text="Sword", Description="Use inventory slot 3 for farming",
     Default=false, Column=2,
     Callback=function(v)
         if v then
@@ -1225,8 +1472,8 @@ swordWeaponToggle=mainTab:AddToggle("weapon_sword", {
 miscTab:AddSection("ESP", { Column = 1 })
 
 miscTab:AddToggle("fruit_esp", {
-    Text="Fruit ESP", Description="Shows ESP boxes and labels around fruits on the map",
-    Default=false, Keybind=true, Column=1,
+    Text="Fruit ESP", Description="Shows drawing ESP with the fruit name and nearest island",
+    Default=false, Column=1,
     Callback=function(v)
         S.fruitEsp=v; S.chamEsp=v
         if v then buildEspLabels(); buildChamBoxes() else clearEspLabels(); clearChamBoxes() end
@@ -1236,7 +1483,7 @@ miscTab:AddToggle("fruit_esp", {
 
 miscTab:AddToggle("chest_esp", {
     Text="Chest ESP", Description="Shows a text label on every spawned chest",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.chestEsp=v
         if v then buildChestEspLabels() else clearChestEspLabels() end
@@ -1246,7 +1493,7 @@ miscTab:AddToggle("chest_esp", {
 
 miscTab:AddToggle("berry_esp", {
     Text="Berry Esp", Description="Shows map berries at 60 Hz with an optimized one-second rescan",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.berryEsp=v
         if v then buildBerryEspLabels() else clearBerryEspLabels() end
@@ -1256,7 +1503,7 @@ miscTab:AddToggle("berry_esp", {
 
 miscTab:AddToggle("boat_esp", {
     Text="Boat ESP", Description="Draws a full 3D box around each on-screen boat",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.boatEsp=v
         if v then buildBoatEsp() else clearBoatEsp() end
@@ -1266,7 +1513,7 @@ miscTab:AddToggle("boat_esp", {
 
 miscTab:AddToggle("flower_esp", {
     Text="Flower Esp", Description="Shows a label and a 3d box around all flowers, 2ND SEA",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.flowerEsp=v
         if v then buildFlowerEsp() else clearFlowerEsp() end
@@ -1278,19 +1525,19 @@ miscTab:AddSection("Combat", { Column = 1 })
 
 miscTab:AddToggle("big_hitbox", {
     Text="Big Hitbox", Description="Expands enemy HumanoidRootPart size for easier hits",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.bigHitbox=v; notify(v and "Big Hitbox ON!" or "Big Hitbox OFF!","laced.club",2) end
 })
 
 miscTab:AddToggle("pull_enemies", {
     Text="Pull Enemies", Description="Pulls all enemies to one point under you",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.pullEnemies=v; notify(v and "Pull Enemies ON!" or "Pull Enemies OFF!","laced.club",2) end
 })
 
 miscTab:AddToggle("buddha_pull", {
     Text="Buddha Pull", Description="Pulls all enemies to X=40 under you",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.buddhaPull=v; notify(v and "Buddha Pull ON!" or "Buddha Pull OFF!","laced.club",2) end
 })
 
@@ -1302,13 +1549,13 @@ miscTab:AddToggle("auto_ken", {
 
 miscTab:AddToggle("auto_haki", {
     Text="Auto Haki", Description="Automatically keeps Armament Haki active",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.autoHaki=v; notify(v and "Auto Haki ON!" or "Auto Haki OFF!","laced.club",2) end
 })
 
 miscTab:AddToggle("freeze_pos", {
     Text="Freeze Position", Description="Locks your character in place",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.freezePos=v
         if v then
@@ -1324,7 +1571,7 @@ miscTab:AddToggle("freeze_pos", {
 
 miscTab:AddToggle("freeze_enemies", {
     Text="Freeze Enemies", Description="Locks all enemies in place (auto-catches new spawns)",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v)
         S.freezeEnemies=v
         S.frozenEnemies={}
@@ -1345,19 +1592,19 @@ miscTab:AddToggle("freeze_enemies", {
 
 miscTab:AddToggle("tween_ember", {
     Text="Auto Tween Dragon Ember", Description="Quickly tweens to Workspace EmberTemplate objects",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.tweenEmber=v; notify(v and "Auto Tween Dragon Ember ON!" or "Auto Tween Dragon Ember OFF!","laced.club",2) end
 })
 
 miscTab:AddToggle("teleport_ember", {
     Text="Auto Tp Azure Embers", Description="Auto tps to azure embers",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.teleportEmber=v; notify(v and "Auto Tp Azure Embers ON!" or "Auto Tp Azure Embers OFF!","laced.club",2) end
 })
 
 miscTab:AddToggle("teleport_kitsune", {
     Text="Goto Kitsune Island", Description="Tweens to Kitsune Island shrine (2s scan)",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.teleportKitsune=v; notify(v and "Goto Kitsune Island ON!" or "Goto Kitsune Island OFF!","laced.club",2) end
 })
 
@@ -1452,7 +1699,7 @@ miscTab:AddDropdown("boat_seat_target", {
 
 miscTab:AddToggle("auto_boat_seat", {
     Text="Auto Go To Seat", Description="Teleports to the selected seat until you are sitting in it",
-    Default=false, Keybind=true, Column=2,
+    Default=false, Column=2,
     Callback=function(v)
         S.autoBoatSeat=v
         if v then refreshBoatSeatList() end
@@ -1640,7 +1887,7 @@ otherTab:AddSection("Custom Pull", { Column = 1 })
 
 otherTab:AddToggle("custom_pull", {
     Text="Custom Pull", Description="Pulls all enemies to a custom XYZ offset relative to you",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.customPull=v; notify(v and "Custom Pull ON!" or "Custom Pull OFF!","laced.club",2) end
 })
 
@@ -1722,13 +1969,13 @@ pvpTab:AddSection("PvP", { Column = 1 })
 
 pvpTab:AddToggle("void_pull", {
     Text="Escape (risky)", Description="Sends you to Y=100000",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.voidPull=v; notify(v and "Go Up ON!" or "Go Up OFF!","laced.club",2) end
 })
 
 pvpTab:AddToggle("sky_pull", {
     Text="Go Back Down (risky)", Description="Brings you back to Y=100",
-    Default=false, Keybind=true, Column=1,
+    Default=false, Column=1,
     Callback=function(v) S.skyPull=v; notify(v and "Go Down ON!" or "Go Down OFF!","laced.club",2) end
 })
 
@@ -2130,20 +2377,42 @@ function buildChamBoxes()
     end
 end
 
+function getFruitIslandName(position)
+    if not position or type(islandList)~="table" then return "Unknown" end
+    local closestName="Unknown"
+    local closestDistanceSq=math.huge
+    for _,island in pairs(islandList) do
+        local islandPosition=island and island.pos or nil
+        if islandPosition then
+            local dx=position.X-islandPosition.X
+            local dz=position.Z-islandPosition.Z
+            local distanceSq=dx*dx+dz*dz
+            if distanceSq<closestDistanceSq then
+                closestDistanceSq=distanceSq
+                closestName=island.name or "Unknown"
+            end
+        end
+    end
+    if closestDistanceSq>625000000 then return "Sea" end
+    return closestName
+end
+
 function buildEspLabels()
     for _, entry in pairs(S.espLabelCache) do entry.label.Visible=false end
     S.espLabels={}
     for _, fruit in pairs(getWorkspaceFruits()) do
         local fruitPart, fruitName=fruit.part, fruit.name
+        local fruitPosition=fruit.position or getSafeFruitPosition(fruitPart)
+        local displayText=fruitName.." ["..getFruitIslandName(fruitPosition).."]"
         local key=getFruitInstanceKey(fruitPart)
         if not S.espLabelCache[key] then
             local label=Drawing.new("Text")
-            label.Text=fruitName; label.Position=Vector2.new(0,0)
+            label.Text=displayText; label.Position=Vector2.new(0,0)
             label.Color=Color3.new(0,1,0); label.Size=14; label.Outline=true
             label.Visible=false; label.ZIndex=10; label.Font=Drawing.Fonts.Monospace; label.Center=true
             S.espLabelCache[key]={label=label, part=fruitPart}
         else
-            S.espLabelCache[key].label.Text=fruitName
+            S.espLabelCache[key].label.Text=displayText
             S.espLabelCache[key].part=fruitPart
         end
         table.insert(S.espLabels, S.espLabelCache[key])
@@ -2860,6 +3129,232 @@ function remoteAttack()
     _lastRemoteFire = os.clock()
 end
 
+do
+    local Dungeon={
+        target=nil,
+        targetingObjective=false,
+        doorWaypoint=nil,
+    }
+
+    local function dungeonDistance(a,b)
+        local dx=a.X-b.X
+        local dy=a.Y-b.Y
+        local dz=a.Z-b.Z
+        return math.sqrt(dx*dx+dy*dy+dz*dz)
+    end
+
+    local function dungeonRoot(object)
+        if not object then return nil end
+        return object:FindFirstChild("HumanoidRootPart")
+            or object:FindFirstChild("UpperTorso")
+            or object:FindFirstChild("Head")
+            or object:FindFirstChildWhichIsA("BasePart")
+    end
+
+    local function dungeonIsSummon(object)
+        if not object then return true end
+        if object:FindFirstChild("Summoner") or object:FindFirstChild("Creator") or object:FindFirstChild("Owner") then return true end
+        local name=string.lower(object.Name or "")
+        return string.find(name,"shadow",1,true)~=nil
+            or string.find(name,"buddy",1,true)~=nil
+            or string.find(name,"blank",1,true)~=nil
+            or string.find(name,"clone",1,true)~=nil
+            or string.find(name,"summon",1,true)~=nil
+            or string.find(name,"decoy",1,true)~=nil
+            or string.find(name,"dummy",1,true)~=nil
+    end
+
+    local function dungeonIsAlive(object)
+        if not object or not object.Parent or dungeonIsSummon(object) then return false end
+        local humanoid=object:FindFirstChildOfClass("Humanoid")
+        return humanoid~=nil and humanoid.Health>0 and dungeonRoot(object)~=nil
+    end
+
+    local function dungeonIsObjective(object)
+        if not dungeonIsAlive(object) then return false end
+        local name=string.lower(object.Name or "")
+        local objective=name=="prophitboxplaceholder"
+            or string.find(name,"placeholder",1,true)~=nil
+            or string.find(name,"gasvent",1,true)~=nil
+            or string.find(name,"vent",1,true)~=nil
+            or string.find(name,"shrine",1,true)~=nil
+            or string.find(name,"rock",1,true)~=nil
+            or string.find(name,"totem",1,true)~=nil
+            or (string.find(name,"prop",1,true)~=nil and string.find(name,"knight",1,true)==nil and string.find(name,"boss",1,true)==nil)
+        if not objective then return false end
+        local humanoid=object:FindFirstChildOfClass("Humanoid")
+        return humanoid and humanoid.MaxHealth<50000
+    end
+
+    local function dungeonNearestIsland(position)
+        local map=game.Workspace:FindFirstChild("Map")
+        local dungeon=map and map:FindFirstChild("Dungeon") or nil
+        if not dungeon then return nil end
+        local best=nil
+        local bestDistance=math.huge
+        for _,island in pairs(dungeon:GetChildren()) do
+            local root=island:FindFirstChild("Root") or island:FindFirstChildWhichIsA("BasePart")
+            if root then
+                local dx=position.X-root.Position.X
+                local dz=position.Z-root.Position.Z
+                local distance=math.sqrt(dx*dx+dz*dz)
+                if distance<bestDistance then
+                    bestDistance=distance
+                    best=island
+                end
+            end
+        end
+        return best
+    end
+
+    local function dungeonDoorWaypoint(position)
+        local island=dungeonNearestIsland(position)
+        local exit=island and island:FindFirstChild("ExitTeleporter") or nil
+        local door=exit and (exit:FindFirstChild("Root") or exit:FindFirstChildWhichIsA("BasePart")) or nil
+        if not door then return nil end
+        local doorPosition=door.Position
+        local dx=doorPosition.X-position.X
+        local dz=doorPosition.Z-position.Z
+        local distanceXZ=math.sqrt(dx*dx+dz*dz)
+        if distanceXZ>30 then
+            local islandRoot=island:FindFirstChild("Root") or island:FindFirstChildWhichIsA("BasePart")
+            local islandY=islandRoot and islandRoot.Position.Y or 200
+            return Vector3.new(doorPosition.X,math.max(position.Y,doorPosition.Y,islandY)+35,doorPosition.Z)
+        end
+        return Vector3.new(doorPosition.X,doorPosition.Y+3,doorPosition.Z)
+    end
+
+    local function dungeonFindTarget(playerPosition)
+        local folder=game.Workspace:FindFirstChild("Enemies")
+        if not folder then return nil,false end
+        local bestObjective=nil
+        local bestObjectiveDistance=math.huge
+        local bestEnemy=nil
+        local bestEnemyDistance=S.dungeonLocalRadius or 800
+
+        for _,enemy in pairs(folder:GetChildren()) do
+            if dungeonIsAlive(enemy) then
+                local root=dungeonRoot(enemy)
+                if root then
+                    local distance=dungeonDistance(playerPosition,root.Position)
+                    if S.dungeonDestroyObj and dungeonIsObjective(enemy) then
+                        if distance<bestObjectiveDistance then
+                            bestObjectiveDistance=distance
+                            bestObjective=enemy
+                        end
+                    elseif distance<bestEnemyDistance then
+                        bestEnemyDistance=distance
+                        bestEnemy=enemy
+                    end
+                end
+            end
+        end
+        if bestObjective then return bestObjective,true end
+        return bestEnemy,false
+    end
+
+    task.spawn(function()
+        while true do
+            if S.dungeonEnabled then
+                local character=LocalPlayer.Character
+                local root=character and character:FindFirstChild("HumanoidRootPart") or nil
+                local humanoid=character and character:FindFirstChildOfClass("Humanoid") or nil
+                if root and humanoid and humanoid.Health>0 then
+                    local target,isObjective=dungeonFindTarget(root.Position)
+                    Dungeon.target=target
+                    Dungeon.targetingObjective=isObjective
+                    Dungeon.doorWaypoint=nil
+                    local targetRoot=dungeonRoot(target)
+                    if targetRoot then
+                        local useRemote=S.remoteMode
+                        local expandedHead=not useRemote and target:FindFirstChild("Head") or nil
+                        local originalHeadSize=nil
+                        local originalHeadCanCollide=nil
+                        if expandedHead then
+                            pcall(function()
+                                originalHeadSize=expandedHead.Size
+                                originalHeadCanCollide=expandedHead.CanCollide
+                            end)
+                        end
+                        local p=targetRoot.Position
+                        local ox,oy,oz=getNormalFarmOffsets()
+                        local targetPosition=Vector3.new(p.X+ox,p.Y+oy,p.Z+oz)
+                        tweenTo(root,targetPosition,S.FARM_SPEED,function()
+                            return S.dungeonEnabled and S.remoteMode==useRemote
+                                and Dungeon.target==target and dungeonIsAlive(target)
+                        end)
+
+                        local lastAttack=0
+                        while S.dungeonEnabled and S.remoteMode==useRemote
+                            and Dungeon.target==target and dungeonIsAlive(target) do
+                            targetRoot=dungeonRoot(target)
+                            if not targetRoot then break end
+                            p=targetRoot.Position
+                            ox,oy,oz=getNormalFarmOffsets()
+                            targetPosition=Vector3.new(p.X+ox,p.Y+oy,p.Z+oz)
+                            hardLockNpcCFrame(root,targetPosition)
+                            if expandedHead then
+                                local size=S.bigHitbox and 200 or 50
+                                pcall(function()
+                                    expandedHead.Size=Vector3.new(size,size,size)
+                                    expandedHead.CanCollide=false
+                                end)
+                            end
+
+                            local now=os.clock()
+                            local attackDelay=useRemote and 0.05 or 0.06
+                            if now-lastAttack>=attackDelay then
+                                lastAttack=now
+                                if useRemote then task.spawn(remoteAttack)
+                                else pcall(mouse1click) end
+                            end
+                            task.wait()
+                        end
+                        if expandedHead and expandedHead.Parent and originalHeadSize then
+                            pcall(function()
+                                expandedHead.Size=originalHeadSize
+                                if originalHeadCanCollide~=nil then expandedHead.CanCollide=originalHeadCanCollide end
+                            end)
+                        end
+                    elseif S.dungeonAutoDoor then
+                        Dungeon.doorWaypoint=dungeonDoorWaypoint(root.Position)
+                        if Dungeon.doorWaypoint then
+                            tweenTo(root,Dungeon.doorWaypoint,S.FARM_SPEED,function()
+                                return S.dungeonEnabled and S.dungeonAutoDoor
+                            end)
+                        end
+                    end
+                end
+            else
+                Dungeon.target=nil
+                Dungeon.targetingObjective=false
+                Dungeon.doorWaypoint=nil
+            end
+            task.wait(0.1)
+        end
+    end)
+
+    task.spawn(function()
+        local skillKeys={0x5A,0x58,0x43,0x56}
+        while true do
+            if S.dungeonEnabled and S.dungeonUseMoves
+                and Dungeon.targetingObjective and dungeonIsAlive(Dungeon.target) then
+                for _,keyCode in pairs(skillKeys) do
+                    if not S.dungeonEnabled or not dungeonIsAlive(Dungeon.target) then break end
+                    pcall(function()
+                        keypress(keyCode)
+                        task.wait(0.04)
+                        keyrelease(keyCode)
+                    end)
+                    task.wait(0.16)
+                end
+            end
+            task.wait(0.3)
+        end
+    end)
+
+end
+
 local function getChestType(chest)
     local okName,name=pcall(function() return chest and chest.Name end)
     if not okName or type(name)~="string" then return "Other" end
@@ -3364,10 +3859,9 @@ end
 
 function afl_teleportToWait(questKey)
     local position=nil
-    -- The two first Tiki quests share a quest giver but their enemies do not
-    -- share a camp. Resolve Island Boy's live spawn instead of trusting the
-    -- Isle Outlaw fallback point.
-    if questKey=="Tiki1Quest2" and afl_getNextNpc then
+    -- Prefer the live enemy spawn for every quest. This handles updated or
+    -- nested Tiki spawns (including Skull Slayers) without stale coordinates.
+    if afl_getNextNpc then
         local target=afl_getNextNpc()
         local targetRoot=target and target:FindFirstChild("HumanoidRootPart")
         if targetRoot then
@@ -3425,42 +3919,135 @@ function afl_getLevels()
     end
 end
 
+function afl_findDialogueOption(optionNumber)
+    local wanted="option"..tostring(optionNumber)
+    local okGui,dialogueGui=pcall(function() return LocalPlayer.PlayerGui:FindFirstChild("DialogueGui") end)
+    if okGui and dialogueGui then
+        local okDesc,descendants=pcall(function() return dialogueGui:GetDescendants() end)
+        if okDesc and descendants then
+            local function safeName(object)
+                local okName,name=pcall(function() return object.Name end)
+                return okName and type(name)=="string" and string.lower(name) or ""
+            end
+            local function ancestorContains(object,fragment)
+                local current=object
+                for _=1,16 do
+                    if not current or current==dialogueGui then break end
+                    if string.find(safeName(current),fragment,1,true) then return true end
+                    local okParent,parent=pcall(function() return current.Parent end)
+                    if not okParent then break end
+                    current=parent
+                end
+                return false
+            end
+            local fallback=nil
+            for _,object in pairs(descendants) do
+                local name=safeName(object)
+                if name=="fill" and ancestorContains(object,"word1") and ancestorContains(object,"button")
+                    and ancestorContains(object,wanted) and ancestorContains(object,"optionslist") then
+                    local okBounds,p,s=pcall(function() return object.AbsolutePosition,object.AbsoluteSize end)
+                    if okBounds and p and s and type(p.X)=="number" and type(p.Y)=="number"
+                        and type(s.X)=="number" and type(s.Y)=="number" and s.X>0 and s.Y>0 then
+                        return object,Vector2.new(p.X+s.X/2,p.Y+s.Y/2)
+                    end
+                elseif not fallback and name=="button" and ancestorContains(object,wanted) then
+                    fallback=object
+                end
+            end
+            if fallback then
+                local okBounds,p,s=pcall(function() return fallback.AbsolutePosition,fallback.AbsoluteSize end)
+                if okBounds and p and s and p.X and p.Y and s.X and s.Y then
+                    return fallback,Vector2.new(p.X+s.X/2,p.Y+s.Y/2)
+                end
+            end
+        end
+    end
+
+    -- Keep compatibility with the dialogue UI used before the update.
+    local okOld,oldDialogue=pcall(function() return LocalPlayer.PlayerGui.Main.Dialogue end)
+    local oldButton=okOld and oldDialogue and oldDialogue:FindFirstChild("Option"..tostring(optionNumber)) or nil
+    if oldButton then
+        local okBounds,p,s=pcall(function() return oldButton.AbsolutePosition,oldButton.AbsoluteSize end)
+        if okBounds and p and s and p.X and p.Y and s.X and s.Y then
+            return oldButton,Vector2.new(p.X+s.X/2,p.Y+s.Y/2)
+        end
+    end
+    return nil,nil
+end
+
+function afl_waitDialogueOption(optionNumber,timeout,notAddress)
+    local started=os.clock()
+    local lastObject,lastCenter=nil,nil
+    while os.clock()-started<(timeout or 3) do
+        local object,center=afl_findDialogueOption(optionNumber)
+        if object and center then
+            lastObject,lastCenter=object,center
+            local address=nil
+            pcall(function() address=object.Address end)
+            if not notAddress or not address or address~=notAddress then return object,center end
+        end
+        wait(0.05)
+    end
+    return lastObject,lastCenter
+end
+
+function afl_clickDialogueOption(optionNumber,timeout,notAddress)
+    local object,center=afl_waitDialogueOption(optionNumber,timeout,notAddress)
+    if not object or not center then return false,nil end
+    if not afl_jitterClick(center.X,center.Y) then return false,nil end
+    mouse1press(); wait(0.1); mouse1release()
+    local address=nil
+    pcall(function() address=object.Address end)
+    return true,address
+end
+
 function afl_setQuest()
-    if not AFL.enableGetQuest then return end
+    if not AFL.enableGetQuest then return false end
     local quest=AFL.questData and AFL.questData[AFL.npcToFarm]
-    if not quest then return end
-    wait(0.5); mouse1press(); mouse1release(); wait(1.1)
-    local ok,dialogue=pcall(function() return LocalPlayer.PlayerGui.Main.Dialogue end)
-    if not ok or not dialogue then return end
-    local function getBtnCenter(name)
-        local btn=dialogue:FindFirstChild(name)
-        if not btn then return nil end
-        local okBounds,p,s=pcall(function() return btn.AbsolutePosition,btn.AbsoluteSize end)
-        if not okBounds or not p or not s or not p.X or not p.Y or not s.X or not s.Y then return nil end
-        return Vector2.new(p.X+s.X/2,p.Y+s.Y/2)
-    end
-    local opt1=getBtnCenter("Option1"); local opt2=getBtnCenter("Option2")
-    if quest.questButton==1 and opt1 then
-        if afl_jitterClick(opt1.X,opt1.Y) then mouse1press(); wait(0.1); mouse1release() end
-    elseif opt2 then
-        if afl_jitterClick(opt2.X,opt2.Y) then mouse1press(); wait(0.1); mouse1release() end
-    end
+    if not quest then return false end
+
     wait(0.5)
-    local confirm=getBtnCenter("Option1")
-    if confirm and afl_jitterClick(confirm.X,confirm.Y) then mouse1press(); wait(0.1); mouse1release() end
+    mouse1press(); wait(0.08); mouse1release()
+    wait(1)
+
+    -- Remember the original Option 1 so the confirmation click waits for the
+    -- refreshed Accept Quest page instead of clicking the first menu twice.
+    local originalOption1=nil
+    local initialOption1=afl_waitDialogueOption(1,3)
+    if initialOption1 then pcall(function() originalOption1=initialOption1.Address end) end
+
+    local selected=afl_clickDialogueOption(quest.questButton,3)
+    if not selected then return false end
+    wait(0.35)
+
+    local accepted=afl_clickDialogueOption(1,3,originalOption1)
+    if not accepted then
+        -- Some servers reuse the same UI object instead of rebuilding it.
+        wait(0.4)
+        accepted=afl_clickDialogueOption(1,1)
+    end
+    return accepted==true
 end
 
 function afl_getNextNpc()
     local quest=AFL.questData[AFL.npcToFarm]; if not quest then return end
     local _,root=afl_getCharacter(); if not root then return end
     local cur=root.Position; local best,bestD=nil,math.huge
-    local ok,enemies=pcall(function() return workspace.Enemies:GetChildren() end)
-    if not ok then return end
+    local folder=workspace:FindFirstChild("Enemies")
+    if not folder then return end
+    local ok,enemies=pcall(function() return folder:GetDescendants() end)
+    if not ok or not enemies then
+        ok,enemies=pcall(function() return folder:GetChildren() end)
+    end
+    if not ok or not enemies then return end
+    local wanted=string.lower(quest.enemy)
     for _,enemy in pairs(enemies) do
-        if enemy and enemy.Parent then
+        if enemy and enemy.Parent and enemy:IsA("Model") then
             local hrp=enemy:FindFirstChild("HumanoidRootPart")
             local hum=enemy:FindFirstChildOfClass("Humanoid")
-            if hrp and hum and hum.Health>0 and string.find(enemy.Name,quest.enemy,1,true) then
+            local enemyName=""
+            pcall(function() enemyName=string.lower(enemy.Name) end)
+            if hrp and hum and hum.Health>0 and string.find(enemyName,wanted,1,true) then
                 local dx=hrp.Position.X-cur.X; local dy=hrp.Position.Y-cur.Y; local dz=hrp.Position.Z-cur.Z
                 local d=dx*dx+dy*dy+dz*dz
                 if d<bestD then bestD=d; best=enemy end
@@ -3475,13 +4062,7 @@ function afl_farmNpcs()
     afl_getLevels()
     if not AFL.npcToFarm then wait(1); return end
     local function pressNevermind()
-        local ok,dialogue=pcall(function() return LocalPlayer.PlayerGui.Main.Dialogue end)
-        if not ok or not dialogue then return end
-        local btn=dialogue:FindFirstChild("Option3"); if not btn then return end
-        local okBounds,p,s=pcall(function() return btn.AbsolutePosition,btn.AbsoluteSize end)
-        if not okBounds or not p or not s or not p.X or not p.Y or not s.X or not s.Y then return end
-        local v=Vector2.new(p.X+s.X/2,p.Y+s.Y/2)
-        if afl_jitterClick(v.X,v.Y) then mouse1press(); wait(0.1); mouse1release() end
+        afl_clickDialogueOption(3,1)
     end
     if farmPriorityBlocked() then return end
     if AFL.islandPositions[AFL.npcToFarm] and AFL.waitPositions[AFL.npcToFarm] then
@@ -4528,9 +5109,11 @@ do
     local PlayerGui = LocalPlayer:FindFirstChild("PlayerGui")
 
     local FishConfig = {
-        CastTarget     = 0.95,
+        CastTarget     = 0.96,
         WaitBeforeReel = 0.2,
-        DeadZone       = 0.5,
+        DeadZone       = 0.35,
+        BiteTimeout    = 20,
+        ResetDelay     = 2,
     }
 
     local FishState = {
@@ -4543,16 +5126,30 @@ do
         WaitStart      = 0,
         Clicks         = 0,
         FishCaught     = 0,
+        LastCastTime   = 0,
+        BiteClickTime  = 0,
     }
 
     local function fish_hold()
-        if not FishState.IsHolding then FishState.IsHolding=true; mouse1press(); FishState.Clicks=FishState.Clicks+1 end
+        if not FishState.IsHolding then FishState.IsHolding=true; pcall(mouse1press); FishState.Clicks=FishState.Clicks+1 end
     end
     local function fish_release()
-        if FishState.IsHolding then FishState.IsHolding=false; mouse1release() end
+        if FishState.IsHolding then FishState.IsHolding=false; pcall(mouse1release) end
     end
     local function fish_click()
-        mouse1click(); FishState.Clicks=FishState.Clicks+1
+        pcall(mouse1click); FishState.Clicks=FishState.Clicks+1
+    end
+
+    local function fish_fullReset()
+        fish_release()
+        FishState.CastComplete=false
+        FishState.FishDetected=false
+        FishState.WaitingForUI=false
+        FishState.ReelingStarted=false
+        FishState.WaitStart=0
+        FishState.LastCastTime=0
+        FishState.BiteClickTime=0
+        task.wait(FishConfig.ResetDelay)
     end
 
     local function fish_getCastFrame()
@@ -4572,14 +5169,22 @@ do
     end
 
     local function fish_getReelUI()
+        if not PlayerGui or not PlayerGui.Parent then PlayerGui=LocalPlayer:FindFirstChild("PlayerGui") end
         if not PlayerGui then return nil end
         local ui=PlayerGui:FindFirstChild("Fishing_Reeling"); if not ui then return nil end
-        local mini=ui:FindFirstChild("Minigame"); if not mini then return nil end
+        local mini=ui:FindFirstChild("Minigame") or ui:FindFirstChild("MiniGame"); if not mini then return nil end
         local con=mini:FindFirstChild("Container"); if not con then return nil end
-        return {Fish=con:FindFirstChild("Fish"), Zone=con:FindFirstChild("ReelZone")}
+        local treasure=con:FindFirstChild("Treasure")
+        local treasureIcon=treasure and (treasure:FindFirstChild("UnopenedIcon") or treasure:FindFirstChild("OpenedIcon")) or nil
+        return {
+            Fish=con:FindFirstChild("Fish"),
+            Treasure=treasureIcon,
+            Zone=con:FindFirstChild("ReelZone") or con:FindFirstChild("Zone")
+        }
     end
 
     local function fish_isReelOpen()
+        if not PlayerGui or not PlayerGui.Parent then PlayerGui=LocalPlayer:FindFirstChild("PlayerGui") end
         return PlayerGui and PlayerGui:FindFirstChild("Fishing_Reeling") ~= nil
     end
 
@@ -4599,9 +5204,24 @@ do
         return metal:FindFirstChild("FishOnLine")
     end
 
+    local function fish_isBiting()
+        if fish_getFishSound() then return true end
+        local char=LocalPlayer.Character
+        if not char then return false end
+        local okDesc,descendants=pcall(function() return char:GetDescendants() end)
+        if not okDesc or not descendants then return false end
+        for _,object in pairs(descendants) do
+            local okName,name=pcall(function() return string.lower(object.Name or "") end)
+            if okName and (string.find(name,"fishonline",1,true) or string.find(name,"fish on line",1,true)) then
+                return true
+            end
+        end
+        return false
+    end
+
     local function fish_isZoneLeft(ui)
         if not ui then return false end
-        local fish=fish_getCenter(ui.Fish); local zone=fish_getCenter(ui.Zone)
+        local fish=fish_getCenter(ui.Treasure or ui.Fish); local zone=fish_getCenter(ui.Zone)
         if fish==0 or zone==0 then return false end
         return zone < fish - FishConfig.DeadZone
     end
@@ -4628,7 +5248,8 @@ do
                         fish_release()
                         FishState.CastComplete=true; FishState.FishDetected=false
                         FishState.WaitingForUI=false; FishState.ReelingStarted=false
-                        FishState.WaitStart=0; ending=false; wasOpen=false
+                        FishState.WaitStart=0; FishState.LastCastTime=os.clock()
+                        ending=false; wasOpen=false
                     end
                 else
                     if not FishState.IsHolding then fish_click(); task.wait(0.1) end
@@ -4636,9 +5257,14 @@ do
                 continue
             end
             if FishState.CastComplete and not FishState.FishDetected then
-                if fish_getFishSound() then
+                if os.clock()-FishState.LastCastTime>FishConfig.BiteTimeout then
+                    fish_fullReset()
+                    continue
+                end
+                if fish_isBiting() then
                     FishState.FishDetected=true
-                    fish_click(); task.wait(0.3); fish_click(); task.wait(0.3); fish_click()
+                    FishState.BiteClickTime=os.clock()
+                    fish_click(); task.wait(0.14); fish_click(); task.wait(0.14); fish_click()
                 end
                 continue
             end
@@ -4663,6 +5289,10 @@ do
                         end
                     end
                 else
+                    if not wasOpen and os.clock()-FishState.BiteClickTime>3 then
+                        fish_fullReset()
+                        continue
+                    end
                     if wasOpen and not ending then
                         ending=true; endTimer=os.clock()
                         FishState.FishCaught=FishState.FishCaught+1
@@ -4692,9 +5322,12 @@ do
         Callback=function(v)
             S.autoFish=v
             if v then
+                S.autoRepair=false
+                pcall(function() Window:Set("auto_ship_repair",false) end)
                 FishState.Running=true; FishState.CastComplete=false; FishState.FishDetected=false
                 FishState.WaitingForUI=false; FishState.ReelingStarted=false
                 FishState.WaitStart=0; FishState.Clicks=0; FishState.FishCaught=0
+                FishState.LastCastTime=0; FishState.BiteClickTime=0
                 task.spawn(fish_mainLoop)
                 notify("Auto Fish started!", "laced.club", 2)
             else
@@ -4703,6 +5336,67 @@ do
             end
         end
     })
+end
+
+do
+    local RepairState={holding=false}
+
+    local function repairRelease()
+        if RepairState.holding then
+            RepairState.holding=false
+            pcall(mouse1release)
+        end
+    end
+
+    local function repairHold()
+        if not RepairState.holding then
+            RepairState.holding=true
+            pcall(mouse1press)
+        end
+    end
+
+    local function getRepairBarInfo()
+        local playerGui=LocalPlayer:FindFirstChild("PlayerGui")
+        local main=playerGui and playerGui:FindFirstChild("Main") or nil
+        local bottom=main and main:FindFirstChild("BottomHUDList") or nil
+        local mini=bottom and bottom:FindFirstChild("RepairMiniGame") or nil
+        local progress=mini and mini:FindFirstChild("ProgressBar") or nil
+        local fill=progress and progress:FindFirstChild("Fill") or nil
+        local goal=progress and progress:FindFirstChild("Goal") or nil
+        if not fill or not goal then return nil end
+
+        local ok,fillPosition,fillSize,goalPosition,goalSize=pcall(function()
+            return fill.AbsolutePosition,fill.AbsoluteSize,goal.AbsolutePosition,goal.AbsoluteSize
+        end)
+        if not ok or not fillPosition or not fillSize or not goalPosition or not goalSize then return nil end
+        return {
+            fillRight=fillPosition.X+fillSize.X,
+            goalLeft=goalPosition.X,
+            goalRight=goalPosition.X+goalSize.X
+        }
+    end
+
+    task.spawn(function()
+        while true do
+            if S.autoRepair then
+                local info=getRepairBarInfo()
+                if info then
+                    if info.fillRight>=info.goalLeft-8 and info.fillRight<=info.goalRight+14 then
+                        repairRelease()
+                        task.wait(0.35)
+                    else
+                        repairHold()
+                    end
+                else
+                    repairRelease()
+                end
+                task.wait(0.02)
+            else
+                repairRelease()
+                task.wait(0.2)
+            end
+        end
+    end)
 end
 
 local MASTERY_WAYPOINTS={
