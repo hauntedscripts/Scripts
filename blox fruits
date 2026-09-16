@@ -1,12 +1,14 @@
 -- script made for matcha, made by haunted
 -- enjoy!
 -- if u wanna edit and post the script ur welcome to in the discord server!
-
 Players = game:GetService("Players")
 LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
     repeat wait(0.1); LocalPlayer = Players.LocalPlayer until LocalPlayer
 end
+
+-- Keep the script quiet; feature/config state is visible in the UI itself.
+local function notify(...) end
 
 S = {
 
@@ -688,6 +690,13 @@ do
             info = info or {}
             local accent = info.Theme and info.Theme.Colors and info.Theme.Colors.Accent
             if accent then self.Raw.AccentColor = accent end
+            -- UE's built-in Settings tab reads the library-wide filename when
+            -- it is created; set it before CreateWindow builds that tab.
+            if info.ConfigFile or info.SettingsFile then
+                -- Keep the UE appearance file separate so its save button
+                -- cannot overwrite the feature/keybind config below.
+                self.Raw.SettingsFile = (info.ConfigFile or info.SettingsFile) .. ".ui.json"
+            end
             local raw = self.Raw:CreateWindow({
                 Title = info.Title or "laced.club",
                 Width = info.Width or 540,
@@ -701,6 +710,147 @@ do
                 Indicator = { SetVisible = function() end },
                 Config = { IndicatorEnabled = false },
                 _lastMenuDown = false,
+            }
+
+            -- Named feature configs.  Each script/window gets a folder instead
+            -- of sharing one fragile JSON file with every other config.
+            local configFolder = tostring(info.ConfigFolder or "laced_club_configs")
+            local selectedConfig = ""
+            local function safeConfigName(name)
+                name = tostring(name or ""):gsub("[^%w%._%- ]", "_"):gsub("^%s+", ""):gsub("%s+$", "")
+                if name == "" then name = "default" end
+                return name:sub(1, 64)
+            end
+            local function ensureConfigFolder()
+                pcall(function()
+                    if not isfolder(configFolder) then makefolder(configFolder) end
+                end)
+            end
+            local function configPathFor(name)
+                return configFolder .. "/" .. safeConfigName(name) .. ".json"
+            end
+            local function listConfigNames()
+                ensureConfigFolder()
+                local names = {}
+                local ok, files = pcall(listfiles, configFolder)
+                if ok and type(files) == "table" then
+                    for _, path in ipairs(files) do
+                        local fileName = tostring(path):match("([^/\\]+)%.json$")
+                        if fileName then table.insert(names, fileName) end
+                    end
+                end
+                table.sort(names)
+                return names
+            end
+            local configPath = configPathFor("default")
+            local function configValue(control)
+                if not control then return nil end
+                local kind = control.Type
+                if kind == "Toggle" then return control.Value == true end
+                if kind == "Slider" then return tonumber(control.Value) end
+                if kind == "KeyPicker" then
+                    return type(control.Value) == "string" and control.Value or "None"
+                end
+                if kind == "Dropdown" then
+                    if control.Multi then
+                        local out = {}
+                        for key, value in pairs(control.Value or {}) do
+                            if type(key) == "string" then out[key] = value == true end
+                        end
+                        return out
+                    end
+                    return type(control.Value) == "string" and control.Value or nil
+                end
+                return nil
+            end
+            local function saveFeatureConfig(name)
+                name = safeConfigName(name or selectedConfig)
+                ensureConfigFolder()
+                local path = configPathFor(name)
+                local data = { version = 4, controls = {}, name = name }
+                local saved = 0
+                for id, control in pairs(controls) do
+                    local value = configValue(control)
+                    if value ~= nil then data.controls[id] = value; saved = saved + 1 end
+                end
+                local ok, err = pcall(function()
+                    local http = game:GetService("HttpService")
+                    writefile(path, http:JSONEncode(data))
+                end)
+                if ok then
+                    selectedConfig = name
+                    configPath = path
+                    window.Config.File = path
+                end
+                return ok
+            end
+            local function loadFeatureConfig(name)
+                name = safeConfigName(name or selectedConfig)
+                local path = configPathFor(name)
+                local wasVisible = raw.Visible
+                local wasToggled = self.Raw.Toggled
+                local ok, data = pcall(function()
+                    local http = game:GetService("HttpService")
+                    return http:JSONDecode(readfile(path))
+                end)
+                -- Do not consume old one-file configs; those were the source
+                -- of the all-toggles-off bug.
+                if not ok or type(data) ~= "table" or data.version ~= 4 or type(data.controls) ~= "table" then
+                    return false
+                end
+                local loaded = 0
+                local toggleStates = {}
+                for id, value in pairs(data.controls) do
+                    local control = controls[id]
+                    if control and control.Type == "Toggle" and type(value) == "boolean" then
+                        toggleStates[id] = value
+                    elseif control and control.SetValue then
+                        local applied = pcall(function() control:SetValue(value) end)
+                        if applied then loaded = loaded + 1 end
+                    end
+                end
+                local previous = {}
+                for id, value in pairs(toggleStates) do
+                    local control = controls[id]
+                    if control then
+                        previous[id] = control.Value == true
+                        control.Value = value
+                    end
+                end
+                for id, value in pairs(toggleStates) do
+                    local control = controls[id]
+                    if control and previous[id] ~= value then
+                        pcall(function() if control.Callback then control.Callback(value) end end)
+                        pcall(function() if control.Changed then control.Changed(value) end end)
+                    end
+                end
+                for id, value in pairs(toggleStates) do
+                    local control = controls[id]
+                    if control then control.Value = value end
+                    loaded = loaded + 1
+                end
+                raw.Visible = wasVisible
+                self.Raw.Toggled = wasToggled
+                raw._visibilityDirty = true
+                selectedConfig = name
+                configPath = path
+                window.Config.File = path
+                return true
+            end
+            local function refreshConfigList(dropdown)
+                local names = listConfigNames()
+                if dropdown and dropdown.SetValues then
+                    pcall(function() dropdown:SetValues(names) end)
+                end
+                if selectedConfig == "" and names[1] then selectedConfig = names[1] end
+                return names
+            end
+            window.Config = {
+                IndicatorEnabled = false,
+                File = configPath,
+                Folder = configFolder,
+                Save = function(name) return saveFeatureConfig(name) end,
+                Load = function(name) return loadFeatureConfig(name) end,
             }
 
             function window:AddTab(name)
@@ -724,16 +874,23 @@ do
             function window:Hide() raw:Hide() return self end
             function window:SetVisible(value) if value then raw:Show() else raw:Hide() end return self end
 
-            -- The source calls Step every frame. UE already renders in its own
-            -- loop, so this only owns the F1 edge used to show/hide the menu.
+            -- UE already owns a single per-window Step loop. Do not run a
+            -- second loop from the script: duplicate polling corrupts keybind
+            -- edge state and causes toggles to fire/miss after a while.
             function window:Step()
-                local down = false
-                pcall(function() down = iskeypressed(0x23) end)
-                if down and not self._lastMenuDown then raw:Toggle() end
-                self._lastMenuDown = down
+                return self
             end
 
             table.insert(Adapter.Windows, window)
+
+            -- UE owns the config UI now. Keep the compatibility API pointed at
+            -- that single named-config system so there is no second loader that
+            -- can overwrite toggles with stale values.
+            if self.Raw.Configs then
+                window.Config.Folder = self.Raw.Configs.Folder
+                window.Config.Save = self.Raw.Configs.Save
+                window.Config.Load = self.Raw.Configs.Load
+            end
             return window
         end
 
@@ -6301,8 +6458,6 @@ task.spawn(function()
     end
 end)
 
-while true do
-    local ok, err = pcall(function() Window:Step() end)
-    if not ok then warn("Step error: "..tostring(err)); task.wait(1) end
-    task.wait()
-end
+-- UE owns the window update loop. Keep the loader alive without polling keys a
+-- second time; duplicate Window:Step calls were the source of drifting binds.
+while true do task.wait(1) end
