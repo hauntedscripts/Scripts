@@ -1,13 +1,9 @@
--- script made for matcha, made by haunted
--- enjoy!
--- if u wanna edit and post the script ur welcome to in the discord server!
 Players = game:GetService("Players")
 LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
     repeat wait(0.1); LocalPlayer = Players.LocalPlayer until LocalPlayer
 end
 
--- Keep the script quiet; feature/config state is visible in the UI itself.
 local function notify(...) end
 
 S = {
@@ -283,7 +279,6 @@ AFL = {
         peanutWait             = Vector3.new(-2049.21,165.51,-10335.04),
         tiki1                  = Vector3.new(-16543.93,55.75,-173.82),
         tiki1Wait              = Vector3.new(-16228.02,145.37,-231.54),
-        -- Island Boy camp (separate from the Isle Outlaw camp)
         tiki1Wait2             = Vector3.new(-16753.20,126.94,-278.50),
         tiki2                  = Vector3.new(-16538.69,55.75,1051.88),
         tiki2Wait              = Vector3.new(-16498.12,131.81,1051.74),
@@ -413,6 +408,9 @@ AFL.waitRoutes={
 }
 
 AFL.waitRouteIndices={}
+AFL.farmLoopRunning=false
+AFL.nextNpcCache=nil
+AFL.nextNpcCacheTime=0
 
 AFL.levelFarmTable = {
     [1]={{1,10,"Sea1First"},{10,15,"Jungle1"},{15,30,"Jungle2"},{30,40,"PirateVillage1"},{40,60,"PirateVillage2"},{60,75,"DesertIsland1"},{75,90,"DesertIsland2"},{90,100,"WinterIsland1"},{100,120,"WinterIsland2"},{120,150,"MarineFortress"},{150,175,"SkyIsland1"},{175,190,"SkyIsland2"},{190,210,"PrisonIsland1"},{210,250,"PrisonIsland2"},{250,275,"ColosseumIsland1"},{275,300,"ColosseumIsland2"},{300,325,"MagmaIsland1"},{325,375,"MagmaIsland2"},{375,400,"UnderWaterIsland1"},{400,450,"UnderWaterIsland2"},{450,475,"SkyIsland3"},{475,525,"SkyIsland4"},{525,550,"SkyIsland5"},{550,625,"SkyIsland6"},{625,650,"FountainIsland1"},{650,700,"FountainIsland2"}},
@@ -453,7 +451,6 @@ islandList = {
 
 do
     local ok, err = pcall(function()
-        -- Load the pinned UE version requested by the script owner.
         local ueSource = game:HttpGet("https://raw.githubusercontent.com/hauntedscripts/Scripts2/refs/heads/main/matcha%20ue")
         local ueChunk, ueError = loadstring(ueSource, "laced.club UE")
         if not ueChunk then error(ueError or "UE compile failed") end
@@ -664,8 +661,6 @@ do
                 AutoShow = false,
                 Center = true,
             })
-            -- UE stores a library-wide visibility flag whenever any window is
-            -- created. A hidden popup must not hide the already-visible hub.
             adapter.Raw.Toggled = true
             local page = makeTab(raw:AddTab(info.Title or "Settings"))
             local popup = { Raw = raw }
@@ -690,11 +685,7 @@ do
             info = info or {}
             local accent = info.Theme and info.Theme.Colors and info.Theme.Colors.Accent
             if accent then self.Raw.AccentColor = accent end
-            -- UE's built-in Settings tab reads the library-wide filename when
-            -- it is created; set it before CreateWindow builds that tab.
             if info.ConfigFile or info.SettingsFile then
-                -- Keep the UE appearance file separate so its save button
-                -- cannot overwrite the feature/keybind config below.
                 self.Raw.SettingsFile = (info.ConfigFile or info.SettingsFile) .. ".ui.json"
             end
             local raw = self.Raw:CreateWindow({
@@ -712,8 +703,6 @@ do
                 _lastMenuDown = false,
             }
 
-            -- Named feature configs.  Each script/window gets a folder instead
-            -- of sharing one fragile JSON file with every other config.
             local configFolder = tostring(info.ConfigFolder or "laced_club_configs")
             local selectedConfig = ""
             local function safeConfigName(name)
@@ -793,8 +782,6 @@ do
                     local http = game:GetService("HttpService")
                     return http:JSONDecode(readfile(path))
                 end)
-                -- Do not consume old one-file configs; those were the source
-                -- of the all-toggles-off bug.
                 if not ok or type(data) ~= "table" or data.version ~= 4 or type(data.controls) ~= "table" then
                     return false
                 end
@@ -874,18 +861,12 @@ do
             function window:Hide() raw:Hide() return self end
             function window:SetVisible(value) if value then raw:Show() else raw:Hide() end return self end
 
-            -- UE already owns a single per-window Step loop. Do not run a
-            -- second loop from the script: duplicate polling corrupts keybind
-            -- edge state and causes toggles to fire/miss after a while.
             function window:Step()
                 return self
             end
 
             table.insert(Adapter.Windows, window)
 
-            -- UE owns the config UI now. Keep the compatibility API pointed at
-            -- that single named-config system so there is no second loader that
-            -- can overwrite toggles with stale values.
             if self.Raw.Configs then
                 window.Config.Folder = self.Raw.Configs.Folder
                 window.Config.Save = self.Raw.Configs.Save
@@ -3131,7 +3112,6 @@ function getNormalFarmOffsets()
                tonumber(S.customOffsetY) or 23,
                tonumber(S.customOffsetZ) or 0
     end
-    -- Sanguine Art keeps the normal Y height and uses only a small positive Z offset.
     if sanguine then return 0,23,10 end
     return 0,23,0
 end
@@ -4016,8 +3996,6 @@ end
 
 function afl_teleportToWait(questKey)
     local position=nil
-    -- Prefer the live enemy spawn for every quest. This handles updated or
-    -- nested Tiki spawns (including Skull Slayers) without stale coordinates.
     if afl_getNextNpc then
         local target=afl_getNextNpc()
         local targetRoot=target and target:FindFirstChild("HumanoidRootPart")
@@ -4100,7 +4078,14 @@ function afl_findDialogueOption(optionNumber)
             local fallback=nil
             for _,object in pairs(descendants) do
                 local name=safeName(object)
-                if name=="fill" and ancestorContains(object,"word1") and ancestorContains(object,"button")
+                if name=="textlabel" and ancestorContains(object,"button")
+                    and ancestorContains(object,wanted) and ancestorContains(object,"optionslist") then
+                    local okBounds,p,s=pcall(function() return object.AbsolutePosition,object.AbsoluteSize end)
+                    if okBounds and p and s and type(p.X)=="number" and type(p.Y)=="number"
+                        and type(s.X)=="number" and type(s.Y)=="number" and s.X>0 and s.Y>0 then
+                        return object,Vector2.new(p.X+s.X/2,p.Y+s.Y/2)
+                    end
+                elseif name=="fill" and ancestorContains(object,"word1") and ancestorContains(object,"button")
                     and ancestorContains(object,wanted) and ancestorContains(object,"optionslist") then
                     local okBounds,p,s=pcall(function() return object.AbsolutePosition,object.AbsoluteSize end)
                     if okBounds and p and s and type(p.X)=="number" and type(p.Y)=="number"
@@ -4120,7 +4105,6 @@ function afl_findDialogueOption(optionNumber)
         end
     end
 
-    -- Keep compatibility with the dialogue UI used before the update.
     local okOld,oldDialogue=pcall(function() return LocalPlayer.PlayerGui.Main.Dialogue end)
     local oldButton=okOld and oldDialogue and oldDialogue:FindFirstChild("Option"..tostring(optionNumber)) or nil
     if oldButton then
@@ -4148,10 +4132,13 @@ function afl_waitDialogueOption(optionNumber,timeout,notAddress)
     return lastObject,lastCenter
 end
 
+local AFL_QUEST_OFFSET_X=70
+local AFL_QUEST_OFFSET_Y=50
+
 function afl_clickDialogueOption(optionNumber,timeout,notAddress)
     local object,center=afl_waitDialogueOption(optionNumber,timeout,notAddress)
     if not object or not center then return false,nil end
-    if not afl_jitterClick(center.X,center.Y) then return false,nil end
+    if not afl_jitterClick(center.X+AFL_QUEST_OFFSET_X,center.Y+AFL_QUEST_OFFSET_Y) then return false,nil end
     mouse1press(); wait(0.1); mouse1release()
     local address=nil
     pcall(function() address=object.Address end)
@@ -4167,8 +4154,6 @@ function afl_setQuest()
     mouse1press(); wait(0.08); mouse1release()
     wait(1)
 
-    -- Remember the original Option 1 so the confirmation click waits for the
-    -- refreshed Accept Quest page instead of clicking the first menu twice.
     local originalOption1=nil
     local initialOption1=afl_waitDialogueOption(1,3)
     if initialOption1 then pcall(function() originalOption1=initialOption1.Address end) end
@@ -4179,7 +4164,6 @@ function afl_setQuest()
 
     local accepted=afl_clickDialogueOption(1,3,originalOption1)
     if not accepted then
-        -- Some servers reuse the same UI object instead of rebuilding it.
         wait(0.4)
         accepted=afl_clickDialogueOption(1,1)
     end
@@ -4190,14 +4174,22 @@ function afl_getNextNpc()
     local quest=AFL.questData[AFL.npcToFarm]; if not quest then return end
     local _,root=afl_getCharacter(); if not root then return end
     local cur=root.Position; local best,bestD=nil,math.huge
+    local wanted=string.lower(quest.enemy)
+    local now=os.clock()
+    if AFL.nextNpcCache and now-(AFL.nextNpcCacheTime or 0)<0.12 then
+        local cached=AFL.nextNpcCache
+        local okCached,aliveCached=pcall(function()
+            return cached and cached.Parent and cached:FindFirstChildOfClass("Humanoid")
+                and cached:FindFirstChildOfClass("Humanoid").Health>0
+                and string.find(string.lower(cached.Name),wanted,1,true)
+        end)
+        if okCached and aliveCached then return cached end
+        AFL.nextNpcCache=nil
+    end
     local folder=workspace:FindFirstChild("Enemies")
     if not folder then return end
-    local ok,enemies=pcall(function() return folder:GetDescendants() end)
-    if not ok or not enemies then
-        ok,enemies=pcall(function() return folder:GetChildren() end)
-    end
+    local ok,enemies=pcall(function() return folder:GetChildren() end)
     if not ok or not enemies then return end
-    local wanted=string.lower(quest.enemy)
     for _,enemy in pairs(enemies) do
         if enemy and enemy.Parent and enemy:IsA("Model") then
             local hrp=enemy:FindFirstChild("HumanoidRootPart")
@@ -4211,6 +4203,8 @@ function afl_getNextNpc()
             end
         end
     end
+    AFL.nextNpcCache=best
+    AFL.nextNpcCacheTime=now
     return best
 end
 
@@ -4353,7 +4347,14 @@ end
 
 task.spawn(function()
     while true do
-        if S.autoFarmLevel and not farmPriorityBlocked() then pcall(afl_farmNpcs) end
+        if S.autoFarmLevel and not farmPriorityBlocked() and not AFL.farmLoopRunning then
+            AFL.farmLoopRunning=true
+            local ok=pcall(afl_farmNpcs)
+            AFL.farmLoopRunning=false
+            AFL.selectedNpc=nil
+            AFL.nextNpcCache=nil
+            if not ok then wait(0.5) end
+        end
         wait(0.5)
     end
 end)
@@ -4678,7 +4679,6 @@ task.spawn(function()
     end
 end)
 
--- Original instant ember collector kept as a separate option.
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -6458,6 +6458,4 @@ task.spawn(function()
     end
 end)
 
--- UE owns the window update loop. Keep the loader alive without polling keys a
--- second time; duplicate Window:Step calls were the source of drifting binds.
 while true do task.wait(1) end
