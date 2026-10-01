@@ -898,7 +898,7 @@ Window = Library:CreateWindow({
     BuiltInIndicatorToggle = false,
     Width = 540,
     Height = 570,
-    Theme = { Colors = { Accent = Color3.fromRGB(0,170,80) } }
+    Theme = { Colors = { Accent = Color3.fromRGB(255,111,0) } }
 })
 
 local mainTab=Window:AddTab("Main")
