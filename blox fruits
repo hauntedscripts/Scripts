@@ -4,7 +4,9 @@ if not LocalPlayer then
     repeat wait(0.1); LocalPlayer = Players.LocalPlayer until LocalPlayer
 end
 
-local function notify(...) end
+local function notify(...)
+    -- Notifications disabled to keep the Matcha console quiet.
+end
 
 S = {
 
@@ -58,6 +60,7 @@ S = {
     voidPull        = false,
     skyPull         = false,
     boatFlyEnabled  = false,
+    boatFlyHoldPos  = false,
     boatTweening    = false,
     autoBoatSeat    = false,
     selectedBoatSeat = nil,
@@ -135,6 +138,10 @@ S = {
     raidMoveGeneration = 0,
     lastRaidIslandCount = 0,
 }
+
+local flySeat=nil
+local flyHoldPos=nil
+local holdBoatSeat=nil
 
 function farmPriorityBlocked()
     return S.fruitPriorityActive == true or S.autoDinoBone == true or S.autoBossFarm == true or S.autoMaterialFarm == true
@@ -1644,8 +1651,11 @@ miscTab:AddToggle("boat_esp", {
     Default=false, Column=1,
     Callback=function(v)
         S.boatEsp=v
-        if v then buildBoatEsp() else clearBoatEsp() end
-        notify(v and "Boat ESP On!" or "Boat ESP Off!","laced.club",2)
+        if v then
+            pcall(buildBoatEsp)
+        else
+            pcall(clearBoatEsp)
+        end
     end
 })
 
@@ -1857,6 +1867,31 @@ miscTab:AddToggle("boat_fly", {
         S.boatFlyEnabled=v
         if not v then S.boatTweening=false end
         notify(v and "Boat Fly ON!" or "Boat Fly OFF!","laced.club",2)
+    end
+})
+
+miscTab:AddToggle("boat_fly_hold", {
+    Text="Hold Position", Description="Caches boat position and keeps teleporting it back",
+    Default=false, Column=2,
+    Callback=function(v)
+        S.boatFlyHoldPos=v
+        if v then
+            -- Lock the exact seat/boat currently selected; never reacquire by
+            -- proximity after the player moves away from it.
+            if not flySeat or not flySeat.Parent then
+                flySeat=findBoatSeatNearPlayer()
+            end
+            holdBoatSeat=flySeat
+            local okPos,p=pcall(function() return holdBoatSeat and holdBoatSeat.Position end)
+            if okPos and p then
+                flyHoldPos=Vector3.new(p.X,p.Y,p.Z)
+            else
+                S.boatFlyHoldPos=false
+            end
+        else
+            flyHoldPos=nil
+            holdBoatSeat=nil
+        end
     end
 })
 
@@ -2261,61 +2296,86 @@ glitchSettingsPopup:AddButton("close_glitch_settings",{
     Callback=function() glitchSettingsPopup:Hide() end
 })
 
-function getBoat()
+local function findBoatSeatNearPlayer()
     local char=LocalPlayer.Character
     local hrp=char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
     local boatsFolder=game.Workspace:FindFirstChild("Boats")
     if not boatsFolder then return nil end
-    for _, b in pairs(boatsFolder:GetChildren()) do
+    local okChildren,children=pcall(function() return boatsFolder:GetChildren() end)
+    if not okChildren or not children then return nil end
+    local best,bestDist=nil,math.huge
+    for _,b in pairs(children) do
         if b:IsA("Model") then
-            local seat=b:FindFirstChildOfClass("VehicleSeat")
-            if seat then
-                local dx=seat.Position.X-hrp.Position.X
-                local dy=seat.Position.Y-hrp.Position.Y
-                local dz=seat.Position.Z-hrp.Position.Z
-                if math.sqrt(dx*dx+dy*dy+dz*dz)<20 then return b end
+            local s=b:FindFirstChildOfClass("VehicleSeat")
+            if s then
+                local okPos,pos=pcall(function() return s.Position end)
+                if okPos and pos then
+                    local dx=pos.X-hrp.Position.X
+                    local dy=pos.Y-hrp.Position.Y
+                    local dz=pos.Z-hrp.Position.Z
+                    local d=math.sqrt(dx*dx+dy*dy+dz*dz)
+                    if d<bestDist and d<20 then
+                        bestDist=d
+                        best=s
+                    end
+                end
             end
         end
     end
-    return nil
+    return best
 end
 
-function getBoatCameraVectors()
-    local char=LocalPlayer.Character
-    local hrp=char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return Vector3.new(0,0,-1), Vector3.new(1,0,0) end
-    local cp=game.Workspace.CurrentCamera.Position
-    local hp=hrp.Position
-    local fx=hp.X-cp.X; local fz=hp.Z-cp.Z
-    local fl=math.sqrt(fx*fx+fz*fz)
-    if fl>0.001 then fx=fx/fl; fz=fz/fl else fx=0; fz=-1 end
-    return Vector3.new(fx,0,fz), Vector3.new(-fz,0,fx)
+local function getBoatCameraVectors()
+    local cam=game.Workspace.CurrentCamera
+    if not cam then return Vector3.new(0,0,-1), Vector3.new(1,0,0) end
+    local look=Vector3.new(0,0,-1)
+    local okCF,cf=pcall(function() return cam.CFrame end)
+    if okCF and cf then
+        local okLV,lv=pcall(function() return cf.LookVector end)
+        if okLV and lv then
+            local flat=Vector3.new(lv.X,0,lv.Z)
+            local len=math.sqrt(flat.X*flat.X+flat.Z*flat.Z)
+            if len>0.001 then
+                look=Vector3.new(flat.X/len,0,flat.Z/len)
+            end
+        end
+    end
+    local right=Vector3.new(-look.Z,0,look.X)
+    return look,right
 end
 
 function boatTweenTo(targetPos)
-    S.currentBoat = getBoat()
-    if not S.currentBoat then notify("No boat found!","Boat Fly",2); return end
-    local primary=S.currentBoat.PrimaryPart
-    if not primary then return end
-    S.boatTweening=true
-    primary.Position=Vector3.new(primary.Position.X, primary.Position.Y+50, primary.Position.Z)
+    local s=findBoatSeatNearPlayer()
+    if not s then notify("No boat found!","Boat Fly",2); return end
+    flySeat=s
+    local okPos,p=pcall(function() return s.Position end)
+    if not okPos or not p then notify("No boat found!","Boat Fly",2); return end
+    local startPos=Vector3.new(p.X,p.Y+50,p.Z)
+    s.Position=startPos
+    s.Velocity=Vector3.new(0,0,0)
+    s.AssemblyLinearVelocity=Vector3.new(0,0,0)
     wait(0.1)
-    local fixedY=primary.Position.Y
-    local startX=primary.Position.X; local startZ=primary.Position.Z
-    local dx=targetPos.X-startX; local dz=targetPos.Z-startZ
+    local okPos2,p2=pcall(function() return s.Position end)
+    if not okPos2 or not p2 then return end
+    local startX,startY,startZ=p2.X,p2.Y,p2.Z
+    local dx=targetPos.X-startX
+    local dz=targetPos.Z-startZ
     local dist=math.sqrt(dx*dx+dz*dz)
-    local duration=dist/S.BOAT_TWEEN_SPEED
+    local duration=math.max(dist/S.BOAT_TWEEN_SPEED,0.01)
     local t0=os.clock()
+    S.boatTweening=true
     while S.boatTweening do
         local alpha=math.min((os.clock()-t0)/duration,1)
-        primary.Position=Vector3.new(startX+dx*alpha, fixedY, startZ+dz*alpha)
-        primary.Velocity=Vector3.new(0,0,0)
-        primary.AssemblyLinearVelocity=Vector3.new(0,0,0)
+        local nx=startX+dx*alpha
+        local nz=startZ+dz*alpha
+        s.Position=Vector3.new(nx,startY,nz)
+        s.Velocity=Vector3.new(0,0,0)
+        s.AssemblyLinearVelocity=Vector3.new(0,0,0)
         if alpha>=1 then break end
-        wait(0.01)
+        task.wait(0.01)
     end
-    S.boatTweening=false; S.currentBoat=nil; S.boatTween=nil
+    S.boatTweening=false
     notify("Arrived!","Boat Fly",2)
 end
 
@@ -2323,19 +2383,82 @@ task.spawn(function()
     while true do
         task.wait()
         if not S.boatFlyEnabled or S.boatTweening then continue end
-        local boat=getBoat(); if not boat then continue end
-        local primary=boat.PrimaryPart; if not primary then continue end
-        local fwd, right=getBoatCameraVectors()
-        local mx, my, mz=0,0,0
-        if iskeypressed(0x57,0) then mx=mx+fwd.X*S.boatFlySpeed;   mz=mz+fwd.Z*S.boatFlySpeed   end
-        if iskeypressed(0x53,0) then mx=mx-fwd.X*S.boatFlySpeed;   mz=mz-fwd.Z*S.boatFlySpeed   end
-        if iskeypressed(0x44,0) then mx=mx+right.X*S.boatFlySpeed; mz=mz+right.Z*S.boatFlySpeed end
-        if iskeypressed(0x41,0) then mx=mx-right.X*S.boatFlySpeed; mz=mz-right.Z*S.boatFlySpeed end
-        if iskeypressed(0x58,0) then my=my+S.boatFlySpeed end
-        if iskeypressed(0x10,0) then my=my-S.boatFlySpeed end
-        primary.Velocity=Vector3.new(0,0,0)
-        primary.AssemblyLinearVelocity=Vector3.new(0,0,0)
-        primary.Position=Vector3.new(primary.Position.X+mx, primary.Position.Y+my, primary.Position.Z+mz)
+        if not flySeat or not flySeat.Parent then
+            flySeat=findBoatSeatNearPlayer()
+            if not flySeat then
+                continue
+            end
+        end
+        local fwd,right=getBoatCameraVectors()
+        local mx,my,mz=0,0,0
+        if iskeypressed(0x57) then
+            mx=mx+fwd.X*S.boatFlySpeed
+            mz=mz+fwd.Z*S.boatFlySpeed
+        end
+        if iskeypressed(0x53) then
+            mx=mx-fwd.X*S.boatFlySpeed
+            mz=mz-fwd.Z*S.boatFlySpeed
+        end
+        if iskeypressed(0x44) then
+            mx=mx+right.X*S.boatFlySpeed
+            mz=mz+right.Z*S.boatFlySpeed
+        end
+        if iskeypressed(0x41) then
+            mx=mx-right.X*S.boatFlySpeed
+            mz=mz-right.Z*S.boatFlySpeed
+        end
+        if iskeypressed(0x58) then
+            my=my+S.boatFlySpeed
+        end
+        if iskeypressed(0x10) then
+            my=my-S.boatFlySpeed
+        end
+        if S.boatFlyHoldPos and flyHoldPos then
+            -- Hard-lock to the cached position, then apply input from that
+            -- exact position so gravity cannot introduce Y drift.
+            local targetX,targetY,targetZ=flyHoldPos.X,flyHoldPos.Y,flyHoldPos.Z
+            if mx~=0 or my~=0 or mz~=0 then
+                targetX=targetX+mx; targetY=targetY+my; targetZ=targetZ+mz
+            end
+            flySeat.Position=Vector3.new(targetX,targetY,targetZ)
+            flyHoldPos=Vector3.new(targetX,targetY,targetZ)
+        elseif mx~=0 or my~=0 or mz~=0 then
+            local okPos,p=pcall(function() return flySeat.Position end)
+            if okPos and p then
+                flySeat.Position=Vector3.new(p.X+mx, p.Y+my, p.Z+mz)
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait()
+        if S.boatFlyHoldPos and not S.boatFlyEnabled then
+            local seat = holdBoatSeat
+            if not seat or not seat.Parent then
+                S.boatFlyHoldPos=false
+                flyHoldPos=nil
+                holdBoatSeat=nil
+            end
+            if seat and seat.Parent then
+                if not flyHoldPos then
+                    local okPos, p = pcall(function() return seat.Position end)
+                    if okPos and p then
+                        flyHoldPos = Vector3.new(p.X, p.Y, p.Z)
+                        notify("Hold Position locked","laced.club",2)
+                    end
+                end
+                if flyHoldPos then
+                    local okPos, p = pcall(function() return seat.Position end)
+                    if okPos and p then
+                        -- Enforce the cached X/Y/Z position every frame,
+                        -- including Y, without changing velocity.
+                        seat.Position = Vector3.new(flyHoldPos.X, flyHoldPos.Y, flyHoldPos.Z)
+                    end
+                end
+            end
+        end
     end
 end)
 
@@ -2358,6 +2481,12 @@ function clearBerryEspLabels()
     S.berryEspLabels={}
 end
 
+local ESP_BOX_EDGES = {
+    {1,2},{2,4},{4,3},{3,1},
+    {5,6},{6,8},{8,7},{7,5},
+    {1,5},{2,6},{3,7},{4,8},
+}
+
 function clearBoatEsp()
     for _,entry in pairs(S.boatEspEntries) do
         if entry and entry.label then entry.label.Visible=false end
@@ -2366,6 +2495,7 @@ function clearBoatEsp()
         end
     end
     S.boatEspEntries={}
+    S.boatEspCache={}
 end
 
 function clearFlowerEsp()
@@ -2826,119 +2956,144 @@ function buildChestEspLabels()
     end
 end
 
-local function getBoatEspKey(boat)
-    local okAddress,address=pcall(function() return boat.Address end)
-    if okAddress and address and address~=0 then return "boat:"..tostring(address) end
-    return "boat:"..tostring(boat)
+
+local BOAT_ESP_DISTANCE = 5000
+local BOAT_ESP_COLOR = Color3.fromRGB(40, 190, 255)
+
+local function boatEspParts(boat)
+    local result = {}
+    if not boat then return result end
+    local ok, descendants = pcall(function() return boat:GetDescendants() end)
+    if not ok or not descendants then return result end
+    for _, object in pairs(descendants) do
+        local okPart, isPart = pcall(function() return object:IsA("BasePart") end)
+        if okPart and isPart then table.insert(result, object) end
+    end
+    return result
 end
 
-local function getBoatEspParts(boat)
-    local parts={}
-    local okBase,isBase=pcall(function() return boat:IsA("BasePart") end)
-    if okBase and isBase==true then table.insert(parts,boat) end
-    local okDescendants,descendants=pcall(function() return boat:GetDescendants() end)
-    if okDescendants and descendants then
-        for _,object in pairs(descendants) do
-            local okPart,isPart=pcall(function() return object:IsA("BasePart") end)
-            if okPart and isPart==true then table.insert(parts,object) end
-        end
-    end
-    return parts
+local function boatEspKey(boat)
+    local ok, address = pcall(function() return boat.Address end)
+    if ok and address and address ~= 0 then return "boat:" .. tostring(address) end
+    return "boat:" .. tostring(boat)
 end
 
-local function getBoatEspBounds(parts)
-    local minX,minY,minZ=math.huge,math.huge,math.huge
-    local maxX,maxY,maxZ=-math.huge,-math.huge,-math.huge
-    local found=false
-    for _,part in pairs(parts or {}) do
-        local okParent,parent=pcall(function() return part.Parent end)
-        local okData,pos,size=pcall(function() return part.Position,part.Size end)
-        if okParent and parent and okData and pos and size then
-            local halfX,halfY,halfZ=size.X/2,size.Y/2,size.Z/2
-            if pos.X-halfX<minX then minX=pos.X-halfX end
-            if pos.Y-halfY<minY then minY=pos.Y-halfY end
-            if pos.Z-halfZ<minZ then minZ=pos.Z-halfZ end
-            if pos.X+halfX>maxX then maxX=pos.X+halfX end
-            if pos.Y+halfY>maxY then maxY=pos.Y+halfY end
-            if pos.Z+halfZ>maxZ then maxZ=pos.Z+halfZ end
-            found=true
+local function boatEspBounds(parts)
+    local minX, minY, minZ = math.huge, math.huge, math.huge
+    local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
+    local valid = false
+    for _, part in pairs(parts) do
+        local okPos, pos = pcall(function() return part.Position end)
+        local okSize, size = pcall(function() return part.Size end)
+        if okPos and pos and okSize and size then
+            valid = true
+            local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+            minX = math.min(minX, pos.X - hx); maxX = math.max(maxX, pos.X + hx)
+            minY = math.min(minY, pos.Y - hy); maxY = math.max(maxY, pos.Y + hy)
+            minZ = math.min(minZ, pos.Z - hz); maxZ = math.max(maxZ, pos.Z + hz)
         end
     end
-    if not found then return nil end
-    return minX,minY,minZ,maxX,maxY,maxZ
+    if not valid then return nil end
+    return minX, minY, minZ, maxX, maxY, maxZ
+end
+
+local function boatEspHide(entry)
+    if not entry then return end
+    if entry.label then entry.label.Visible = false end
+    for _, line in pairs(entry.lines or {}) do line.Visible = false end
+end
+
+function clearBoatEsp()
+    for _, entry in pairs(S.boatEspEntries or {}) do boatEspHide(entry) end
+    S.boatEspEntries = {}
+    S.boatEspCache = {}
 end
 
 function buildBoatEsp()
-    for _,entry in pairs(S.boatEspCache) do
-        if entry.label then entry.label.Visible=false end
-        for _,line in pairs(entry.lines or {}) do line.Visible=false end
-    end
-    S.boatEspEntries={}
+    for _, entry in pairs(S.boatEspEntries or {}) do boatEspHide(entry) end
+    S.boatEspEntries = {}
+    local folder = game.Workspace:FindFirstChild("Boats")
+    if not folder then return end
 
-    local boats=game.Workspace:FindFirstChild("Boats")
-    if not boats then return end
-    local okChildren,children=pcall(function() return boats:GetChildren() end)
-    if not okChildren or not children then return end
-
-    for _,boat in pairs(children) do
-        local parts=getBoatEspParts(boat)
-        if #parts>0 then
-            local anchor=nil
-            pcall(function() anchor=boat.PrimaryPart end)
-            if not anchor then
-                for _,part in pairs(parts) do
-                    local okClass,className=pcall(function() return part.ClassName end)
-                    if okClass and className=="VehicleSeat" then anchor=part; break end
+    local ok, boats = pcall(function() return folder:GetChildren() end)
+    if not ok or not boats then return end
+    for _, boat in pairs(boats) do
+        local okModel, isModel = pcall(function() return boat:IsA("Model") end)
+        if okModel and isModel then
+            local parts = boatEspParts(boat)
+            if #parts > 0 then
+                local key = boatEspKey(boat)
+                local entry = S.boatEspCache[key]
+                if not entry then
+                    local lines = {}
+                    for _ = 1, 12 do
+                        local line = Drawing.new("Line")
+                        line.Color = BOAT_ESP_COLOR; line.Thickness = 2
+                        line.Visible = false; line.ZIndex = 10
+                        table.insert(lines, line)
+                    end
+                    local label = Drawing.new("Text")
+                    label.Color = Color3.fromRGB(255, 255, 255)
+                    label.Size = 16; label.Outline = true; label.Center = true
+                    label.Font = Drawing.Fonts.Monospace; label.Visible = false
+                    label.ZIndex = 11
+                    entry = {boat = boat, parts = parts, lines = lines, label = label}
+                    S.boatEspCache[key] = entry
+                else
+                    entry.boat = boat; entry.parts = parts
                 end
-            end
-            if not anchor then anchor=parts[1] end
-
-            local minX,minY,minZ,maxX,maxY,maxZ=getBoatEspBounds(parts)
-            local okAnchor,anchorPos=pcall(function() return anchor and anchor.Position end)
-            if anchor and minX and okAnchor and anchorPos then
-            local bounds={
-                minX=minX-anchorPos.X,minY=minY-anchorPos.Y,minZ=minZ-anchorPos.Z,
-                maxX=maxX-anchorPos.X,maxY=maxY-anchorPos.Y,maxZ=maxZ-anchorPos.Z,
-            }
-            local key=getBoatEspKey(boat)
-            local okName,boatName=pcall(function() return boat.Name end)
-            boatName=(okName and type(boatName)=="string" and boatName~="") and boatName or "Boat"
-            local entry=S.boatEspCache[key]
-            if not entry then
-                local lines={}
-                for _=1,12 do
-                    local line=Drawing.new("Line")
-                    line.Color=Color3.fromRGB(40,190,255)
-                    line.Thickness=2
-                    line.Visible=false
-                    line.ZIndex=10
-                    table.insert(lines,line)
-                end
-                local label=Drawing.new("Text")
-                label.Text=boatName
-                label.Position=Vector2.new(0,0)
-                label.Color=Color3.fromRGB(90,215,255)
-                label.Size=18
-                label.Outline=true
-                label.Center=true
-                label.Font=Drawing.Fonts.Monospace
-                label.Visible=false
-                label.ZIndex=11
-                entry={boat=boat,anchor=anchor,bounds=bounds,name=boatName,lines=lines,label=label}
-                S.boatEspCache[key]=entry
-            else
-                entry.boat=boat
-                entry.anchor=anchor
-                entry.bounds=bounds
-                entry.name=boatName
-                entry.label.Text=boatName
-            end
-            table.insert(S.boatEspEntries,entry)
+                local okName, name = pcall(function() return boat.Name end)
+                entry.name = (okName and type(name) == "string" and name ~= "") and name or "Boat"
+                entry.label.Text = entry.name
+                table.insert(S.boatEspEntries, entry)
             end
         end
     end
 end
 
+function updateBoatEspEntry(entry)
+    if not entry or not entry.boat or not entry.label then return end
+    local okParent, parent = pcall(function() return entry.boat.Parent end)
+    if not okParent or not parent then boatEspHide(entry); return end
+    local parts = entry.parts
+    local minX,minY,minZ,maxX,maxY,maxZ = boatEspBounds(parts)
+    if not minX then boatEspHide(entry); return end
+
+    local char = LocalPlayer and LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local okPlayer, playerPos = pcall(function() return hrp and hrp.Position end)
+    local cx,cy,cz = (minX+maxX)*0.5,(minY+maxY)*0.5,(minZ+maxZ)*0.5
+    if okPlayer and playerPos then
+        local dx,dy,dz=cx-playerPos.X,cy-playerPos.Y,cz-playerPos.Z
+        if dx*dx+dy*dy+dz*dz > BOAT_ESP_DISTANCE*BOAT_ESP_DISTANCE then boatEspHide(entry); return end
+    end
+
+    local corners={
+        Vector3.new(minX,minY,minZ),Vector3.new(maxX,minY,minZ),
+        Vector3.new(minX,maxY,minZ),Vector3.new(maxX,maxY,minZ),
+        Vector3.new(minX,minY,maxZ),Vector3.new(maxX,minY,maxZ),
+        Vector3.new(minX,maxY,maxZ),Vector3.new(maxX,maxY,maxZ),
+    }
+    local points,any={},false
+    for i,corner in ipairs(corners) do
+        local ok,screen,on=pcall(function() return WorldToScreen(corner) end)
+        if ok and screen and on then points[i]=screen; any=true end
+    end
+    if not any then boatEspHide(entry); return end
+    for i,edge in ipairs(ESP_BOX_EDGES) do
+        local a,b=points[edge[1]],points[edge[2]]
+        if a and b then
+            entry.lines[i].From=a; entry.lines[i].To=b; entry.lines[i].Visible=true
+        else entry.lines[i].Visible=false end
+    end
+    local sx,sy,ex,ey=math.huge,math.huge,-math.huge,-math.huge
+    for _,point in pairs(points) do
+        sx=math.min(sx,point.X); sy=math.min(sy,point.Y)
+        ex=math.max(ex,point.X); ey=math.max(ey,point.Y)
+    end
+    entry.label.Position=Vector2.new((sx+ex)*0.5,sy-20)
+    entry.label.Visible=true
+end
 local FLOWER_ESP_TARGETS={
     {workspaceName="Flower1",label="Blue Flower",color=Color3.fromRGB(55,145,255)},
     {workspaceName="Flower2",label="Red Flower",color=Color3.fromRGB(255,65,65)},
@@ -3015,12 +3170,6 @@ function buildFlowerEsp()
         end
     end
 end
-
-local ESP_BOX_EDGES={
-    {1,2},{2,4},{4,3},{3,1},
-    {5,6},{6,8},{8,7},{7,5},
-    {1,5},{2,6},{3,7},{4,8},
-}
 
 local function updateWorldBoxEntry(entry)
     local visible=false
@@ -4447,10 +4596,11 @@ end)
 task.spawn(function()
     while true do
         if S.boatEsp then
-            for _,entry in pairs(S.boatEspEntries) do
-                updateWorldBoxEntry(entry)
+            for _, entry in pairs(S.boatEspEntries) do
+                updateBoatEspEntry(entry)
             end
         end
+        -- Update every available executor frame.
         task.wait()
     end
 end)
@@ -6459,3 +6609,7 @@ task.spawn(function()
 end)
 
 while true do task.wait(1) end
+
+
+
+
