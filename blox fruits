@@ -2417,18 +2417,22 @@ task.spawn(function()
         if iskeypressed(0x10) then
             my=my-S.boatFlySpeed
         end
-        if mx~=0 or my~=0 or mz~=0 then
+        if S.boatFlyHoldPos and flyHoldPos then
+            -- Use the cached position as the source every frame. This stops
+            -- gravity/physics from pulling the boat away while still letting
+            -- Boat Fly movement update the cached position.
+            local targetX,targetY,targetZ=flyHoldPos.X,flyHoldPos.Y,flyHoldPos.Z
+            if mx~=0 or my~=0 or mz~=0 then
+                targetX=targetX+mx
+                targetY=targetY+my
+                targetZ=targetZ+mz
+            end
+            flySeat.Position=Vector3.new(targetX,targetY,targetZ)
+            flyHoldPos=Vector3.new(targetX,targetY,targetZ)
+        elseif mx~=0 or my~=0 or mz~=0 then
             local okPos,p=pcall(function() return flySeat.Position end)
             if okPos and p then
                 flySeat.Position=Vector3.new(p.X+mx, p.Y+my, p.Z+mz)
-                -- Boat Fly movement becomes the new locked position; Hold
-                -- Position only prevents outside movement from drifting it.
-                if S.boatFlyHoldPos then
-                    local okHold, movedPos=pcall(function() return flySeat.Position end)
-                    if okHold and movedPos then
-                        flyHoldPos=Vector3.new(movedPos.X,movedPos.Y,movedPos.Z)
-                    end
-                end
             end
         end
     end
@@ -6149,9 +6153,9 @@ task.spawn(function()
                     pcall(function()
                         setrobloxinput(true)
                         keyrelease(0x58)
-                        task.wait(0.02)
+                        task.wait(0.005)
                         keypress(0x58)
-                        task.wait(0.08)
+                        task.wait(0.035)
                         keyrelease(0x58)
                     end)
                 end)
@@ -6176,15 +6180,15 @@ task.spawn(function()
                     pcall(function()
                         setrobloxinput(true)
                         keyrelease(0x58)
-                        task.wait(0.02)
+                        task.wait(0.005)
                         keypress(0x58)
-                        task.wait(0.08)
+                        task.wait(0.035)
                         keyrelease(0x58)
-                        task.wait(0.025)
+                        task.wait(0.005)
                         keyrelease(0x5A)
-                        task.wait(0.02)
+                        task.wait(0.005)
                         keypress(0x5A)
-                        task.wait(0.08)
+                        task.wait(0.035)
                         keyrelease(0x5A)
                     end)
                 end)
