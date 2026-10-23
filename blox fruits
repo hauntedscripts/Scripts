@@ -1337,6 +1337,28 @@ do
     end)
 end
 
+misc2Tab:AddSection("Teams (matcha pro)",{Column=1})
+misc2Tab:AddButton("switch_to_pirates",{
+    Text="Switch to Pirates",
+    Description="Switches your team to Pirates",
+    Column=1,
+    Callback=function()
+        pcall(function()
+            game.ReplicatedStorage.Remotes.CommF_:InvokeServer("SetTeam2","Pirates")
+        end)
+    end
+})
+misc2Tab:AddButton("switch_to_marines",{
+    Text="Switch to Marines",
+    Description="Switches your team to Marines",
+    Column=1,
+    Callback=function()
+        pcall(function()
+            game.ReplicatedStorage.Remotes.CommF_:InvokeServer("SetTeam2","Marines")
+        end)
+    end
+})
+
 misc2Tab:AddSection("Ship Repair",{Column=1})
 misc2Tab:AddToggle("auto_ship_repair",{
     Text="Auto Repair",
